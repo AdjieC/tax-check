@@ -1,9 +1,13 @@
-import { analyzeTaxScenarioInput, mergeParsedInputs } from "@/lib/tax/calculator";
+import {
+  analyzeTaxScenarioInput,
+  costCorrectionKeyForRealizedTradeId,
+  mergeParsedInputs,
+} from "@/lib/tax/calculator";
 import { taxConfigForYear } from "@/lib/tax/config";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
 import { parseLongbridgePdfs } from "@/lib/parsers/longbridge";
 import { ParserValidationError } from "@/lib/parsers/common";
-import type { CostBasisMethod, ParsedInput, RealizedTrade, TaxAnalysis } from "@/lib/tax/types";
+import type { CostBasisCorrection, CostBasisMethod, ParsedInput, RealizedTrade, TaxAnalysis } from "@/lib/tax/types";
 
 export type BrokerId = "futu" | "longbridge";
 
@@ -91,20 +95,24 @@ export function recomputeAnalyses(
   parsedInput: ParsedInput,
   taxYear: number,
   excludedKeys: Set<string>,
+  costCorrections: CostBasisCorrection[] = [],
 ): Record<CostBasisMethod, TaxAnalysis> {
   const scoped = filterByTaxYear(applyExclusions(withTaxYearIssues(parsedInput, taxYear), excludedKeys), taxYear);
   const config = taxConfigForYear(taxYear);
   return {
-    fifo: analyzeTaxScenarioInput(scoped, taxYear, "fifo", config),
-    acb: analyzeTaxScenarioInput(scoped, taxYear, "acb", config),
+    fifo: analyzeTaxScenarioInput(scoped, taxYear, "fifo", config, costCorrections),
+    acb: analyzeTaxScenarioInput(scoped, taxYear, "acb", config, costCorrections),
   };
 }
+
+export { costCorrectionKeyForRealizedTradeId };
 
 export async function analyzeUploadedFiles(options: {
   files: UploadFileEntry[];
   taxYear: number;
   password?: string;
   manualCosts?: ManualCostInput[];
+  costCorrections?: CostBasisCorrection[];
   excludedKeys?: Set<string>;
 }): Promise<AnalysisResult> {
   const realFiles = options.files.filter((entry) => entry.file);
@@ -162,7 +170,12 @@ export async function analyzeUploadedFiles(options: {
   const parsedInput = mergeParsedInputs(inputs);
   return {
     parsedInput,
-    byMethod: recomputeAnalyses(parsedInput, options.taxYear, options.excludedKeys ?? new Set()),
+    byMethod: recomputeAnalyses(
+      parsedInput,
+      options.taxYear,
+      options.excludedKeys ?? new Set(),
+      options.costCorrections ?? [],
+    ),
   };
 }
 

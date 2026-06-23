@@ -1,6 +1,7 @@
 import { defaultTaxConfig } from "./config";
 import type {
   BrokerSummary,
+  CostBasisCorrection,
   CostBasisMethod,
   Currency,
   CurrencySummary,
@@ -31,6 +32,10 @@ function statusFor(value: number): "gain" | "loss" | "flat" {
 
 function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+export function costCorrectionKeyForRealizedTradeId(id: string) {
+  return String(id).replace(/-calendar-(fifo|acb)$/, "");
 }
 
 interface TaxWindow {
@@ -282,12 +287,55 @@ function replayScenario(
   };
 }
 
-function buildTaxScenarios(input: ParsedInput, config: TaxConfig, selectedYear?: number): TaxScenarioSummary[] {
+function costCorrectionMap(corrections: CostBasisCorrection[] = []) {
+  const map = new Map<string, number>();
+  for (const correction of corrections) {
+    if (!correction.id) continue;
+    if (!Number.isFinite(correction.costBasis) || correction.costBasis < 0) continue;
+    map.set(correction.id, correction.costBasis);
+  }
+  return map;
+}
+
+function applyCostCorrections(trades: RealizedTrade[], corrections: CostBasisCorrection[] = []) {
+  if (corrections.length === 0) return trades;
+  const correctionsById = costCorrectionMap(corrections);
+  if (correctionsById.size === 0) return trades;
+
+  return trades.map((trade) => {
+    const correction =
+      correctionsById.get(costCorrectionKeyForRealizedTradeId(trade.id)) ?? correctionsById.get(trade.id);
+    if (correction === undefined) return trade;
+
+    const costBasis = roundMoney(correction);
+    const gainLoss = roundMoney(trade.proceeds - costBasis);
+    return {
+      ...trade,
+      costBasis,
+      gainLoss,
+      note: `${trade.note ? `${trade.note}；` : ""}用户手动订正成本：${costBasis}`,
+    };
+  });
+}
+
+function capitalGainRmbFromTrades(trades: RealizedTrade[], config: TaxConfig) {
+  return trades.reduce((sum, trade) => sum + toRmb(trade.gainLoss, trade.currency, config), 0);
+}
+
+function buildTaxScenarios(
+  input: ParsedInput,
+  config: TaxConfig,
+  selectedYear?: number,
+  costCorrections: CostBasisCorrection[] = [],
+): TaxScenarioSummary[] {
   const targetYear = selectedYear ?? maxActivityYear(input);
   return taxWindows(targetYear).flatMap((window) => {
     return (["fifo", "acb"] as const).map((method) => {
       const result = replayScenario(input, window, method, config);
+      const trades = applyCostCorrections(result.trades, costCorrections);
       const id = `calendar-${method}` as TaxScenarioId;
+      const capitalGainRmb = capitalGainRmbFromTrades(trades, config);
+      const capitalTaxBaseRmb = Math.max(capitalGainRmb, 0);
       return {
         id,
         label: `自然年 ${method.toUpperCase()}`,
@@ -296,10 +344,10 @@ function buildTaxScenarios(input: ParsedInput, config: TaxConfig, selectedYear?:
         yearEnd: window.end,
         taxYearMode: window.mode,
         costBasisMethod: method,
-        capitalGainRmb: roundMoney(result.capitalGainRmb),
-        capitalTaxBaseRmb: roundMoney(result.capitalTaxBaseRmb),
-        capitalEstimatedTaxRmb: roundMoney(result.capitalEstimatedTaxRmb),
-        realizedTradeCount: result.realizedTradeCount,
+        capitalGainRmb: roundMoney(capitalGainRmb),
+        capitalTaxBaseRmb: roundMoney(capitalTaxBaseRmb),
+        capitalEstimatedTaxRmb: roundMoney(capitalTaxBaseRmb * config.taxRate),
+        realizedTradeCount: trades.length,
         missingCostIssueCount: result.missingCostIssueCount,
         isDefault: method === "acb",
       } satisfies TaxScenarioSummary;
@@ -461,13 +509,15 @@ export function analyzeTaxScenarioInput(
   targetYear: number,
   costBasisMethod: CostBasisMethod,
   config: TaxConfig = defaultTaxConfig,
+  costCorrections: CostBasisCorrection[] = [],
 ): TaxAnalysis {
   const [window] = taxWindows(targetYear);
   const scenario = replayScenario(input, window, costBasisMethod, config);
+  const correctedTrades = applyCostCorrections(scenario.trades, costCorrections);
   const dividends = input.dividends.filter((dividend) => inWindow(dividend.date, window));
   const scopedInput: ParsedInput = {
     ...input,
-    realizedTrades: scenario.trades,
+    realizedTrades: correctedTrades,
     dividends,
     openPositions: input.openPositions.filter((position) => !position.asOf || position.asOf.startsWith(String(targetYear))),
     costBasisRequests: input.costBasisRequests.filter((request) => inWindow(request.sellDate, window)),
@@ -475,7 +525,7 @@ export function analyzeTaxScenarioInput(
   const analysis = analyzeTaxInput(scopedInput, config);
   return {
     ...analysis,
-    taxScenarios: buildTaxScenarios(input, config, targetYear),
+    taxScenarios: buildTaxScenarios(input, config, targetYear, costCorrections),
   };
 }
 

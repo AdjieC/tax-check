@@ -110,6 +110,11 @@ export interface CostBasisRequest {
   note?: string;
 }
 
+export interface CostBasisCorrection {
+  id: string;
+  costBasis: number;
+}
+
 export interface ParsedInput {
   realizedTrades: RealizedTrade[];
   tradeActivities: TradeActivity[];

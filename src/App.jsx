@@ -16,9 +16,13 @@ import {
   FileText,
   Info,
   Megaphone,
+  Monitor,
+  Pencil,
   Printer,
+  RotateCcw,
   Search,
   ShieldCheck,
+  Smartphone,
   Square,
   Table2,
   Trash2,
@@ -40,7 +44,7 @@ import {
   TAX_RATE,
   TAX_YEAR,
 } from "./data";
-import { analyzeUploadedFiles, recomputeAnalyses } from "./lib/clientAnalyze";
+import { analyzeUploadedFiles, costCorrectionKeyForRealizedTradeId, recomputeAnalyses } from "./lib/clientAnalyze";
 import { ParserValidationError } from "./lib/parsers/common";
 
 const RAW_TOTAL = PNL_ROWS.reduce((sum, row) => sum + row.pnlOriginal * FX[row.market], 0);
@@ -51,6 +55,20 @@ function fmt(n, digits = 2) {
   return Math.abs(n).toLocaleString("en-US", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
+  });
+}
+
+function fmtUnit(n) {
+  return Math.abs(n).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function fmtPrice(n) {
+  return Math.abs(n).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
   });
 }
 
@@ -86,12 +104,16 @@ function computeRows(methodId) {
 
 function summarize(rows, excludedRowKeys) {
   const capitalGain = rows.reduce((sum, row) => (excludedRowKeys.has(row.key) ? sum : sum + row.rmb), 0);
-  const taxable = capitalGain + DIVIDEND_RMB;
+  const capitalTaxBase = Math.max(capitalGain, 0);
+  const taxable = capitalTaxBase + DIVIDEND_RMB;
   return {
     capitalGain,
+    capitalTaxBase,
     dividend: DIVIDEND_RMB,
+    dividendTaxBase: DIVIDEND_RMB,
+    dividendWithholdingCredit: 0,
     taxable,
-    tax: Math.max(taxable, 0) * TAX_RATE,
+    tax: taxable * TAX_RATE,
     includedCount: rows.filter((row) => !excludedRowKeys.has(row.key)).length,
   };
 }
@@ -99,6 +121,7 @@ function summarize(rows, excludedRowKeys) {
 function emptySummary() {
   return {
     capitalGain: 0,
+    capitalTaxBase: 0,
     dividend: 0,
     dividendTaxBase: 0,
     dividendWithholdingCredit: 0,
@@ -124,6 +147,7 @@ function summaryFromAnalysis(analysis, fx = FX) {
   if (!analysis) return emptySummary();
   return {
     capitalGain: analysis.summary.capitalGainRmb,
+    capitalTaxBase: analysis.summary.capitalTaxBaseRmb,
     dividend: dividendNetRmbFromDividends(analysis.dividends, fx),
     dividendTaxBase: analysis.summary.dividend.taxableBaseRmb,
     dividendWithholdingCredit: analysis.summary.dividend.withholdingCreditRmb,
@@ -316,8 +340,87 @@ function isValidManualCostValue(value) {
   return Number.isFinite(numericValue) && numericValue >= 0;
 }
 
+function costInputToTotalCost(value, mode, quantity) {
+  if (!isValidManualCostValue(value)) return null;
+  const numericValue = Number(String(value).trim());
+  if (mode === "unit" && (!Number.isFinite(quantity) || quantity <= 0)) return null;
+  const totalCost = mode === "unit" ? numericValue * quantity : numericValue;
+  return Number(totalCost.toFixed(2));
+}
+
+function totalCostToInputValue(totalCost, mode, quantity) {
+  if (!isValidManualCostValue(totalCost)) return "";
+  const numericValue = Number(String(totalCost).trim());
+  if (mode === "unit" && Number.isFinite(quantity) && quantity > 0) return (numericValue / quantity).toFixed(2);
+  return String(numericValue);
+}
+
+function switchCostInputMode(value, currentMode, nextMode, quantity) {
+  const totalCost = costInputToTotalCost(value, currentMode, quantity);
+  if (totalCost === null) return value;
+  return nextMode === "unit" ? totalCostToInputValue(totalCost, "unit", quantity) : String(totalCost);
+}
+
+function limitDecimalPlaces(value, digits = 2) {
+  const text = String(value ?? "");
+  if (!text) return "";
+  const cleaned = text.replace(/[^\d.]/g, "");
+  const dotIndex = cleaned.indexOf(".");
+  if (dotIndex === -1) return cleaned;
+  const integer = cleaned.slice(0, dotIndex) || "0";
+  const fraction = cleaned.slice(dotIndex + 1).replaceAll(".", "").slice(0, digits);
+  return `${integer}.${fraction}`;
+}
+
+function normalizeCostInput(value, mode) {
+  return mode === "unit" ? limitDecimalPlaces(value, 2) : value;
+}
+
+function costInputLabel(currency, mode) {
+  return `${mode === "unit" ? "每股成本" : "总成本"}（${currency}）`;
+}
+
+function costInputPlaceholder(mode) {
+  return mode === "unit" ? "例如 427.05" : "例如 298935";
+}
+
+function costCorrectionInputsFromState(costCorrections) {
+  return Object.entries(costCorrections)
+    .filter(([, value]) => isValidManualCostValue(value))
+    .map(([id, value]) => ({ id, costBasis: Number(String(value).trim()) }));
+}
+
 function needsLongbridgePassword(files) {
   return files.some((file) => file.file && file.broker === "longbridge" && /\.pdf$/i.test(file.name));
+}
+
+function detectMobileDevice() {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const mobileUa = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+  const coarsePointer = window.matchMedia?.("(hover: none) and (pointer: coarse)")?.matches ?? false;
+  const narrowViewport = Math.min(window.innerWidth, window.innerHeight) < 820;
+  return mobileUa || (coarsePointer && narrowViewport);
+}
+
+function useIsMobileDevice() {
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+
+  useEffect(() => {
+    function update() {
+      setIsMobileDevice(detectMobileDevice());
+    }
+
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
+
+  return isMobileDevice;
 }
 
 function brokerLabel(broker) {
@@ -599,6 +702,24 @@ function Segmented({ value, options, onChange, className = "", tourId }) {
   );
 }
 
+function CostModeToggle({ value, onChange, quantity, inputValue, className = "" }) {
+  function changeMode(nextMode) {
+    if (nextMode === value) return;
+    onChange(nextMode, switchCostInputMode(inputValue, value, nextMode, quantity));
+  }
+
+  return (
+    <div className={`cost-mode-toggle ${className}`} role="group" aria-label="成本录入方式">
+      <button type="button" className={value === "total" ? "on" : ""} onClick={() => changeMode("total")}>
+        总成本
+      </button>
+      <button type="button" className={value === "unit" ? "on" : ""} onClick={() => changeMode("unit")}>
+        每股成本
+      </button>
+    </div>
+  );
+}
+
 function TopBar({ activePage, onNavigate }) {
   const nav = [
     ["workbench", "税务工作台"],
@@ -672,12 +793,13 @@ function ContextBar({ year, setYear, methodId, setMethodId, files, excludedRecor
   );
 }
 
-function Kpis({ summary, dividendCount }) {
+function Kpis({ summary }) {
+  const taxBeforeCredit = summary.taxable * TAX_RATE;
   return (
     <section className="kpis">
       <div className="kpi feature">
         <div className="k-top">
-          <span className="k-label">应缴资本利得税</span>
+          <span className="k-label">预估应补税额</span>
           <span className="k-ic">
             <DollarSign />
           </span>
@@ -687,7 +809,8 @@ function Kpis({ summary, dividendCount }) {
           {fmt(summary.tax)}
         </div>
         <div className="k-foot">
-          <span className="tag rate">税率 20%</span>按综合所得「财产转让」口径预估
+          <span className="tag rate">税率 20%</span>
+          抵免前 {fmt(taxBeforeCredit)} - 预提税抵免 {fmt(summary.dividendWithholdingCredit)}
         </div>
       </div>
 
@@ -700,30 +823,35 @@ function Kpis({ summary, dividendCount }) {
         </div>
         <div className={`k-val ${classForNumber(summary.capitalGain)}`}>{signed(summary.capitalGain)}</div>
         <div className="k-foot">
-          <span className="tag up">已折算 RMB</span>含买卖价差，未含未实现浮盈
+          <span className="tag up">已折算 RMB</span>资本亏损不抵减分红应税基数
         </div>
       </div>
 
       <div className="kpi">
         <div className="k-top">
-          <span className="k-label">分红收入（税后净额）</span>
+          <span className="k-label">分红净入账（税后）</span>
           <span className="k-ic">
             <CreditCard />
           </span>
         </div>
         <div className="k-val">{signed(summary.dividend)}</div>
-        <div className="k-foot">已扣预提税 · 来自 {dividendCount} 笔记录</div>
+        <div className="k-foot">
+          税前基数 {fmt(summary.dividendTaxBase)} - 预提税 {fmt(summary.dividendWithholdingCredit)} - 费用{" "}
+          {fmt(Math.max(summary.dividendTaxBase - summary.dividendWithholdingCredit - summary.dividend, 0))}
+        </div>
       </div>
 
       <div className="kpi">
         <div className="k-top">
-          <span className="k-label">应税所得合计</span>
+          <span className="k-label">应税基数合计</span>
           <span className="k-ic">
             <Square />
           </span>
         </div>
         <div className="k-val">{fmt(summary.taxable)}</div>
-        <div className="k-foot">已实现盈亏 + 分红 - 剔除标的</div>
+        <div className="k-foot">
+          资本利得基数 {fmt(summary.capitalTaxBase)} + 分红税前基数 {fmt(summary.dividendTaxBase)}
+        </div>
       </div>
     </section>
   );
@@ -849,8 +977,10 @@ function PnlTable({
   toggleRowExcluded,
   summary,
   manualCosts,
-  onManualCostChange,
+  costCorrections,
   onSubmitManualCost,
+  onSubmitCostCorrection,
+  onClearCostCorrection,
   analysisStatus,
   fx,
   pendingCostFlashToken,
@@ -858,12 +988,29 @@ function PnlTable({
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("all");
   const [openRow, setOpenRow] = useState(null);
+  const [lockedRowOrder, setLockedRowOrder] = useState(null);
   const method = methodById(methodId);
-  const filteredRows = rows.filter((row) => {
+  const displayRows = useMemo(() => {
+    if (!openRow || !lockedRowOrder) return rows;
+    const byKey = new Map(rows.map((row) => [row.key, row]));
+    const orderedRows = lockedRowOrder.map((key) => byKey.get(key)).filter(Boolean);
+    const orderedKeys = new Set(lockedRowOrder);
+    const newRows = rows.filter((row) => !orderedKeys.has(row.key));
+    return [...orderedRows, ...newRows];
+  }, [lockedRowOrder, openRow, rows]);
+  const filteredRows = displayRows.filter((row) => {
     const okQuery = !query || `${row.code} ${row.name}`.toLowerCase().includes(query.trim().toLowerCase());
     const okMarket = market === "all" || row.market === market;
     return okQuery && okMarket;
   });
+
+  useEffect(() => {
+    if (!openRow) {
+      setLockedRowOrder(null);
+      return;
+    }
+    setLockedRowOrder((current) => current ?? rows.map((row) => row.key));
+  }, [openRow, rows]);
 
   return (
     <>
@@ -884,6 +1031,9 @@ function PnlTable({
             setOpenRow(null);
           }}
         />
+        <span className="hint-chip">
+          <Info /> 转仓标的可展开具体行订正成本
+        </span>
         <div className="tool-spacer" />
         <span className="tcount">
           计入计算 <b>{summary.includedCount}</b> / {rows.length} 只
@@ -955,8 +1105,10 @@ function PnlTable({
                       idx={idx}
                       method={method}
                       manualCosts={manualCosts}
-                      onManualCostChange={onManualCostChange}
+                      costCorrections={costCorrections}
                       onSubmitManualCost={onSubmitManualCost}
+                      onSubmitCostCorrection={onSubmitCostCorrection}
+                      onClearCostCorrection={onClearCostCorrection}
                       analysisStatus={analysisStatus}
                     />
                   ) : null}
@@ -979,11 +1131,28 @@ function PnlTable({
   );
 }
 
-function PnlDetailRow({ row, idx, method, manualCosts, onManualCostChange, onSubmitManualCost, analysisStatus }) {
+function PnlDetailRow({
+  row,
+  idx,
+  method,
+  manualCosts,
+  costCorrections = {},
+  onSubmitManualCost,
+  onSubmitCostCorrection,
+  onClearCostCorrection,
+  analysisStatus,
+}) {
+  const [editingCostKey, setEditingCostKey] = useState(null);
+  const [draftCost, setDraftCost] = useState("");
+  const [correctionCostMode, setCorrectionCostMode] = useState("unit");
+  const [missingCostMode, setMissingCostMode] = useState("unit");
+  const [missingCostDraft, setMissingCostDraft] = useState(null);
+
   if (row.missingCost) {
     const request = row.missingCostRequest;
-    const rawValue = manualCosts[request.id] ?? "";
-    const canSubmit = isValidManualCostValue(rawValue) && analysisStatus !== "running";
+    const rawValue = missingCostDraft ?? totalCostToInputValue(manualCosts[request.id], missingCostMode, request.quantity);
+    const totalCost = costInputToTotalCost(rawValue, missingCostMode, request.quantity);
+    const canSubmit = totalCost !== null && analysisStatus !== "running";
     return (
       <tr className="detail-row">
         <td colSpan="8">
@@ -994,20 +1163,35 @@ function PnlDetailRow({ row, idx, method, manualCosts, onManualCostChange, onSub
               </b>{" "}
               成本缺失，暂未进入应税盈亏
               <span className="dh-note">
-                已识别 {request.sellDate} 卖出 {request.quantity.toLocaleString()} 股，收入 {request.currency} {fmt(request.proceeds)}。补入这批卖出对应的总成本后，会重新生成 FIFO / ACB 结果。
+                已识别 {request.sellDate} 卖出 {request.quantity.toLocaleString()} 股，收入 {request.currency} {fmt(request.proceeds)}。补入这批卖出对应的总成本或每股成本后，会重新生成 FIFO / ACB 结果。
               </span>
             </div>
             <div className="inline-cost">
               <label>
-                <span>总成本（{request.currency}）</span>
+                <span>{costInputLabel(request.currency, missingCostMode)}</span>
+                <CostModeToggle
+                  value={missingCostMode}
+                  inputValue={rawValue}
+                  quantity={request.quantity}
+                  onChange={(nextMode, nextValue) => {
+                    setMissingCostMode(nextMode);
+                    setMissingCostDraft(nextValue);
+                  }}
+                />
                 <input
                   className="plain-input"
                   value={rawValue}
-                  onChange={(event) => onManualCostChange(request.id, event.target.value)}
-                  placeholder="例如 298935"
+                  onChange={(event) => setMissingCostDraft(normalizeCostInput(event.target.value, missingCostMode))}
+                  placeholder={costInputPlaceholder(missingCostMode)}
                   inputMode="decimal"
                   onClick={(event) => event.stopPropagation()}
                 />
+                {missingCostMode === "unit" && totalCost !== null ? (
+                  <span className="cost-total-preview">
+                    折算总成本：{request.currency} {fmt(totalCost)}
+                    <small>买入手续费需已摊入每股成本</small>
+                  </span>
+                ) : null}
               </label>
               <button
                 className="btn primary"
@@ -1015,7 +1199,7 @@ function PnlDetailRow({ row, idx, method, manualCosts, onManualCostChange, onSub
                 disabled={!canSubmit}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onSubmitManualCost(request.id, rawValue);
+                  if (totalCost !== null) onSubmitManualCost(request.id, String(totalCost));
                 }}
               >
                 <Calculator /> {analysisStatus === "running" ? "重算中..." : "确认并重算"}
@@ -1045,29 +1229,170 @@ function PnlDetailRow({ row, idx, method, manualCosts, onManualCostChange, onSub
                 <th>成交日期</th>
                 <th>{isReal ? "来源" : "方向"}</th>
                 <th className="r">数量</th>
-                <th className="r">{isReal ? "成本" : "成交价"}</th>
-                <th className="r">{isReal ? `收益（${row.currency}）` : `成交额（${row.currency}）`}</th>
+                <th className="r" title={isReal ? "按卖出收入 / 数量计算" : undefined}>
+                  {isReal ? "卖出价格" : "成交价"}
+                </th>
+                <th className="r">{isReal ? "成本" : "成交额"}</th>
+                <th className="r">{isReal ? `收益（${row.currency}）` : "参考"}</th>
+                <th className="c">订正</th>
               </tr>
             </thead>
             <tbody>
-              {txns.map((txn) => (
-                <tr key={txn.id ?? `${txn.date}-${txn.side}-${txn.qty}`}>
-                  <td className="num">{txn.sellDate ?? txn.date}</td>
-                  <td>
-                    <span className={`side ${isReal ? "se" : txn.side === "买入" ? "bi" : "se"}`}>{isReal ? txn.source : txn.side}</span>
-                  </td>
-                  <td className="r num">{(txn.quantity ?? txn.qty).toLocaleString()}</td>
-                  <td className="r num">{fmt(isReal ? txn.costBasis : txn.price)}</td>
-                  <td className={`r num ${isReal ? classForNumber(txn.gainLoss) : ""}`}>{fmt(isReal ? txn.gainLoss : txn.qty * txn.price)}</td>
-                </tr>
-              ))}
+              {txns.map((txn) => {
+                const correctionKey = isReal ? costCorrectionKeyForRealizedTradeId(txn.id) : null;
+                const correctionValue = correctionKey ? costCorrections[correctionKey] : undefined;
+                const isCorrected = isValidManualCostValue(correctionValue);
+                const isEditing = correctionKey && editingCostKey === correctionKey;
+                const quantity = txn.quantity ?? txn.qty;
+                const sellPrice = quantity > 0 ? (isReal ? txn.proceeds / quantity : txn.price) : 0;
+                const costValue = isReal ? txn.costBasis : quantity * txn.price;
+                const unitCost = quantity > 0 ? costValue / quantity : null;
+                const totalCorrectionCost = costInputToTotalCost(draftCost, correctionCostMode, quantity);
+                const canSubmitCorrection = totalCorrectionCost !== null && analysisStatus !== "running";
+
+                return (
+                  <tr key={txn.id ?? `${txn.date}-${txn.side}-${txn.qty}`}>
+                    <td className="num">{txn.sellDate ?? txn.date}</td>
+                    <td>
+                      <span className={`side ${isReal ? "se" : txn.side === "买入" ? "bi" : "se"}`}>{isReal ? txn.source : txn.side}</span>
+                    </td>
+                    <td className="r num">{quantity.toLocaleString()}</td>
+                    <td className="r num price-cell">{fmtPrice(sellPrice)}</td>
+                    <td className="r num cost-cell">
+                      {isEditing ? (
+                        <span className="cost-edit-stack">
+                          <span className="cost-edit-caption">录入方式</span>
+                          <CostModeToggle
+                            className="compact"
+                            value={correctionCostMode}
+                            inputValue={draftCost}
+                            quantity={quantity}
+                            onChange={(nextMode, nextValue) => {
+                              setCorrectionCostMode(nextMode);
+                              setDraftCost(nextValue);
+                            }}
+                          />
+                          <input
+                            className="cost-edit-input"
+                            value={draftCost}
+                            onChange={(event) => setDraftCost(normalizeCostInput(event.target.value, correctionCostMode))}
+                            onClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setEditingCostKey(null);
+                                setDraftCost("");
+                              }
+                              if (event.key === "Enter" && canSubmitCorrection && totalCorrectionCost !== null) {
+                                onSubmitCostCorrection(correctionKey, String(totalCorrectionCost));
+                                setEditingCostKey(null);
+                                setDraftCost("");
+                              }
+                            }}
+                            inputMode="decimal"
+                            aria-label={costInputLabel(row.currency, correctionCostMode)}
+                            placeholder={costInputPlaceholder(correctionCostMode)}
+                            autoFocus
+                          />
+                          {correctionCostMode === "unit" && totalCorrectionCost !== null ? (
+                            <span className="cost-total-preview compact">
+                              总成本 {fmt(totalCorrectionCost)}
+                              <small>买入手续费需已摊入每股成本</small>
+                            </span>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="cost-cell-content">
+                          <span className="cost-total-line">{fmt(costValue)}</span>
+                          {unitCost !== null ? <span className="cost-unit-line">每股 {fmtUnit(unitCost)}</span> : null}
+                          {isCorrected ? <span className="cost-correction-badge">已订正</span> : null}
+                        </span>
+                      )}
+                    </td>
+                    <td className={`r num ${isReal ? classForNumber(txn.gainLoss) : "muted"}`}>{isReal ? fmt(txn.gainLoss) : "-"}</td>
+                    <td className="c">
+                      {isReal ? (
+                        <span className="cost-actions">
+                          {isEditing ? (
+                            <>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="确认订正"
+                                aria-label="确认订正"
+                                disabled={!canSubmitCorrection}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (!canSubmitCorrection) return;
+                                  if (totalCorrectionCost === null) return;
+                                  onSubmitCostCorrection(correctionKey, String(totalCorrectionCost));
+                                  setEditingCostKey(null);
+                                  setDraftCost("");
+                                }}
+                              >
+                                <Check />
+                              </button>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="取消"
+                                aria-label="取消"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setEditingCostKey(null);
+                                  setDraftCost("");
+                                }}
+                              >
+                                <X />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="订正成本"
+                                aria-label="订正成本"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setEditingCostKey(correctionKey);
+                                  setCorrectionCostMode("unit");
+                                  setDraftCost(totalCostToInputValue(isCorrected ? correctionValue : costValue, "unit", quantity));
+                                }}
+                              >
+                                <Pencil />
+                              </button>
+                              {isCorrected ? (
+                                <button
+                                  className="icon-mini-btn"
+                                  type="button"
+                                  title="撤销订正"
+                                  aria-label="撤销订正"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onClearCostCorrection(correctionKey);
+                                  }}
+                                >
+                                  <RotateCcw />
+                                </button>
+                              ) : null}
+                            </>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="muted">-</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan="4" className="r">
+                <td colSpan="5" className="r">
                   当前口径已实现盈亏（{row.currency}）
                 </td>
                 <td className={`r num ${classForNumber(row.pnlOriginal)}`}>{cnSigned(row.pnlOriginal)}</td>
+                <td />
               </tr>
             </tfoot>
           </table>
@@ -1203,23 +1528,31 @@ function TaxSummary({ summary, fx }) {
   const total = Math.abs(summary.capitalGain) + Math.abs(summary.dividend);
   const gainPct = total ? (Math.abs(summary.capitalGain) / total) * 100 : 0;
   const dividendPct = 100 - gainPct;
+  const taxBeforeCredit = summary.taxable * TAX_RATE;
 
   return (
     <div className="tax-grid">
       <div className="tax-flow">
         <div className="flow-row">
           <div className="lab">
-            <b>已实现资本利得</b>
-            <span>买卖价差，按年末汇率折算</span>
+            <b>已实现资本盈亏</b>
+            <span>买卖价差，按年末汇率折算；亏损不抵减分红应税基数</span>
           </div>
           <div className={`v ${classForNumber(summary.capitalGain)}`}>{cnSigned(summary.capitalGain)}</div>
         </div>
         <div className="flow-row">
           <div className="lab">
             <b>分红收入</b>
-            <span>税后净额，按年末中间价折算</span>
+            <span>页面展示税后净额；计税使用税前分红基数</span>
           </div>
           <div className="v">{cnSigned(summary.dividend)}</div>
+        </div>
+        <div className="flow-row">
+          <div className="lab">
+            <b>资本利得应税基数</b>
+            <span>已实现资本盈亏小于 0 时按 0 计入</span>
+          </div>
+          <div className="v">{fmt(summary.capitalTaxBase)}</div>
         </div>
         <div className="flow-row">
           <div className="lab">
@@ -1230,14 +1563,29 @@ function TaxSummary({ summary, fx }) {
         </div>
         <div className="flow-row">
           <div className="lab">
-            <b>应税所得额合计</b>
+            <b>应税基数合计</b>
+            <span>资本利得应税基数 + 分红税前应税基数</span>
           </div>
           <div className="v">{fmt(summary.taxable)}</div>
         </div>
+        <div className="flow-row">
+          <div className="lab">
+            <b>抵免前税额</b>
+            <span>应税基数合计 × 20%</span>
+          </div>
+          <div className="v">¥{fmt(taxBeforeCredit)}</div>
+        </div>
+        <div className="flow-row">
+          <div className="lab">
+            <b>分红预提税抵免</b>
+            <span>券商已扣缴的境外预提税，按当前口径抵免</span>
+          </div>
+          <div className="v neg">-¥{fmt(summary.dividendWithholdingCredit)}</div>
+        </div>
         <div className="flow-row total">
           <div className="lab">
-            <b>应缴资本利得税</b>
-            <span>财产转让所得 × 20%</span>
+            <b>预估应补税额</b>
+            <span>抵免前税额 - 分红预提税抵免</span>
           </div>
           <div className="v">¥{fmt(summary.tax)}</div>
         </div>
@@ -1390,8 +1738,10 @@ function Workbench({
   password,
   onPasswordChange,
   manualCosts,
-  onManualCostChange,
+  costCorrections,
   onSubmitManualCost,
+  onSubmitCostCorrection,
+  onClearCostCorrection,
   dividends,
   tradeActivities,
   excludedRecords,
@@ -1416,7 +1766,7 @@ function Workbench({
     <>
       <ContextBar year={year} setYear={setYear} methodId={methodId} setMethodId={setMethodId} files={files} excludedRecords={excludedRecords} symbolCount={rows.length} />
       <main className="wrap">
-        <Kpis summary={summary} dividendCount={dividends.length} />
+        <Kpis summary={summary} />
         <div className="grid">
           <Sidebar
             year={year}
@@ -1448,8 +1798,10 @@ function Workbench({
                 toggleRowExcluded={toggleRowExcluded}
                 summary={summary}
                 manualCosts={manualCosts}
-                onManualCostChange={onManualCostChange}
+                costCorrections={costCorrections}
                 onSubmitManualCost={onSubmitManualCost}
+                onSubmitCostCorrection={onSubmitCostCorrection}
+                onClearCostCorrection={onClearCostCorrection}
                 analysisStatus={analysisStatus}
                 fx={fx}
                 pendingCostFlashToken={pendingCostFlashToken}
@@ -1731,7 +2083,7 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
 
         <div className="sum">
           <div className="cell lead">
-            <div className="lab">应缴资本利得税（推荐口径）</div>
+            <div className="lab">预估应补税额（推荐口径）</div>
             <div className="val">
               <span className="cur">RMB</span>
               {fmt(best.summary.tax)}
@@ -1741,18 +2093,18 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
             </span>
           </div>
           <div className="cell">
-            <div className="lab">应税所得合计</div>
+            <div className="lab">应税基数合计</div>
             <div className="val">
               <span className="cur">¥</span>
               {fmt(best.summary.taxable)}
             </div>
           </div>
           <div className="cell">
-            <div className="lab">已实现盈亏</div>
+            <div className="lab">已实现资本盈亏</div>
             <div className={`val ${classForNumber(best.summary.capitalGain)}`}>{cnSigned(best.summary.capitalGain)}</div>
           </div>
           <div className="cell">
-            <div className="lab">分红收入（税后）</div>
+            <div className="lab">分红净入账（税后）</div>
             <div className="val">
               <span className="cur">¥</span>
               {fmt(dividendNetRmb)}
@@ -1778,9 +2130,9 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
           <tbody>
             <tr>
               <td className="rowlab">
-                <b>已实现资本利得</b>
+                <b>已实现资本盈亏</b>
                 <br />
-                买卖价差，按年末汇率折算
+                买卖价差，按年末汇率折算；亏损不抵减分红应税基数
               </td>
               <td className={`col ${bestColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
               <td className={`col ${bestColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
@@ -1789,17 +2141,28 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
               <td className="rowlab">
                 <b>分红收入</b>
                 <br />
-                税后净额，年末中间价折算
+                税后净额展示；计税使用税前分红基数
               </td>
               <td className={`col ${bestColClass("fifo")}`}>{cnSigned(dividendNetRmb)}</td>
               <td className={`col ${bestColClass("acb")}`}>{cnSigned(dividendNetRmb)}</td>
             </tr>
             <tr>
               <td className="rowlab">
-                <b>应税所得合计</b>
+                <b>应税基数合计</b>
+                <br />
+                资本利得应税基数 + 分红税前应税基数
               </td>
               <td className={`col ${bestColClass("fifo")}`}>{fmt(fifo.taxable)}</td>
               <td className={`col ${bestColClass("acb")}`}>{fmt(acb.taxable)}</td>
+            </tr>
+            <tr>
+              <td className="rowlab">
+                <b>分红预提税抵免</b>
+                <br />
+                券商已扣缴的境外预提税
+              </td>
+              <td className={`col ${bestColClass("fifo")}`}>-¥{fmt(fifo.dividendWithholdingCredit)}</td>
+              <td className={`col ${bestColClass("acb")}`}>-¥{fmt(acb.dividendWithholdingCredit)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -1809,7 +2172,7 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
               <td className={`col ${bestColClass("acb")}`}>20%</td>
             </tr>
             <tr className="total">
-              <td>应缴资本利得税</td>
+              <td>预估应补税额</td>
               <td className={`col ${bestColClass("fifo")}`}>¥{fmt(fifo.tax)}</td>
               <td className={`col ${bestColClass("acb")}`}>¥{fmt(acb.tax)}</td>
             </tr>
@@ -1854,7 +2217,7 @@ function ReportPage({ year, methodSummaries, excludedRecords, files, dividends, 
           </tbody>
           <tfoot>
             <tr>
-              <td>已实现资本利得合计</td>
+              <td>已实现资本盈亏合计</td>
               <td className={`r num ${classForNumber(fifo.capitalGain)} ${bestColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
               <td className={`r num ${classForNumber(acb.capitalGain)} ${bestColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
               <td />
@@ -2016,6 +2379,42 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function MobileUnsupportedOverlay() {
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  function copyCurrentLink() {
+    if (!navigator.clipboard?.writeText) return;
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setCopiedLink(true);
+      window.setTimeout(() => setCopiedLink(false), 1800);
+    });
+  }
+
+  return (
+    <div className="mobile-unsupported-backdrop" role="presentation">
+      <section className="mobile-unsupported-card" role="dialog" aria-modal="true" aria-labelledby="mobile-unsupported-title">
+        <div className="mobile-device-icons" aria-hidden="true">
+          <span>
+            <Smartphone />
+          </span>
+          <ArrowRight />
+          <span className="desktop">
+            <Monitor />
+          </span>
+        </div>
+        <h2 id="mobile-unsupported-title">请在电脑上使用 TaxCheck</h2>
+        <p>
+          TaxCheck 需要上传券商文件、核对大表格、订正成本并生成申报底稿。手机屏幕不适合完成这些流程，当前版本不做手机端适配。
+        </p>
+        <p className="mobile-unsupported-note">请在电脑浏览器打开当前链接后继续使用。</p>
+        <button className="btn primary" type="button" onClick={copyCurrentLink}>
+          <Copy /> {copiedLink ? "已复制链接" : "复制当前链接"}
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function ProjectIntroModal({ onStart, onClose }) {
   return (
     <div className="app-modal-backdrop" role="presentation">
@@ -2086,8 +2485,17 @@ function AppIssueModal({ issue, onClose }) {
   );
 }
 
-function CostBasisModal({ request, value, analysisStatus, onChange, onSubmit, onClose }) {
-  const canSubmit = isValidManualCostValue(value) && analysisStatus !== "running";
+function CostBasisModal({ request, value, analysisStatus, onSubmit, onClose }) {
+  const [mode, setMode] = useState("unit");
+  const [inputValue, setInputValue] = useState(totalCostToInputValue(value, "unit", request.quantity));
+
+  useEffect(() => {
+    setMode("unit");
+    setInputValue(totalCostToInputValue(value, "unit", request.quantity));
+  }, [request.id, request.quantity, value]);
+
+  const totalCost = costInputToTotalCost(inputValue, mode, request.quantity);
+  const canSubmit = totalCost !== null && analysisStatus !== "running";
   return (
     <div className="app-modal-backdrop" role="presentation">
       <section className="intro-modal cost-basis-modal" role="dialog" aria-modal="true" aria-labelledby="cost-basis-title">
@@ -2100,7 +2508,7 @@ function CostBasisModal({ request, value, analysisStatus, onChange, onSubmit, on
         <span className="modal-kicker warning">需要补充</span>
         <h2 id="cost-basis-title">{request.symbol} 历史成本缺失</h2>
         <p>
-          系统检测到目标年度卖出 {request.quantity.toLocaleString()} 股 {request.securityName}，但上传材料无法匹配足够买入成本。请输入这批卖出对应的总成本，确认后会立即重新计算 FIFO / ACB。
+          系统检测到目标年度卖出 {request.quantity.toLocaleString()} 股 {request.securityName}，但上传材料无法匹配足够买入成本。请输入这批卖出对应的总成本或每股成本，确认后会立即重新计算 FIFO / ACB。
         </p>
         <div className="cost-basis-card">
           <div>
@@ -2122,19 +2530,34 @@ function CostBasisModal({ request, value, analysisStatus, onChange, onSubmit, on
           className="cost-basis-form"
           onSubmit={(event) => {
             event.preventDefault();
-            if (canSubmit) onSubmit(request.id, value);
+            if (canSubmit && totalCost !== null) onSubmit(request.id, String(totalCost));
           }}
         >
           <label>
-            <span>总成本（{request.currency}）</span>
+            <span>{costInputLabel(request.currency, mode)}</span>
+            <CostModeToggle
+              value={mode}
+              inputValue={inputValue}
+              quantity={request.quantity}
+              onChange={(nextMode, nextValue) => {
+                setMode(nextMode);
+                setInputValue(nextValue);
+              }}
+            />
             <input
               className="plain-input"
-              value={value}
-              onChange={(event) => onChange(request.id, event.target.value)}
-              placeholder="例如 298935"
+              value={inputValue}
+              onChange={(event) => setInputValue(normalizeCostInput(event.target.value, mode))}
+              placeholder={costInputPlaceholder(mode)}
               inputMode="decimal"
               autoFocus
             />
+            {mode === "unit" && totalCost !== null ? (
+              <span className="cost-total-preview">
+                折算总成本：{request.currency} {fmt(totalCost)}
+                <small>买入手续费需已摊入每股成本</small>
+              </span>
+            ) : null}
           </label>
           <div className="intro-actions">
             <button className="btn" type="button" onClick={onClose}>
@@ -2281,6 +2704,7 @@ function GuidedTour({ stepIndex, steps, onNext, onBack, onClose }) {
 
 export default function App() {
   const fileInputRef = useRef(null);
+  const isMobileDevice = useIsMobileDevice();
   const [page, setPage] = useState("workbench");
   const [year, setYear] = useState(TAX_YEAR);
   const [methodId, setMethodId] = useState("fifo");
@@ -2292,6 +2716,7 @@ export default function App() {
   const [analysisStatus, setAnalysisStatus] = useState("idle");
   const [password, setPassword] = useState("");
   const [manualCosts, setManualCosts] = useState({});
+  const [costCorrections, setCostCorrections] = useState({});
   const [copied, setCopied] = useState(false);
   const [showIntro, setShowIntro] = useState(true);
   const [tourStep, setTourStep] = useState(-1);
@@ -2305,8 +2730,8 @@ export default function App() {
 
   useEffect(() => {
     if (!parsedInput) return;
-    setAnalyses(recomputeAnalyses(parsedInput, year, excludedRowKeys));
-  }, [excludedRowKeys, parsedInput, year]);
+    setAnalyses(recomputeAnalyses(parsedInput, year, excludedRowKeys, costCorrectionInputsFromState(costCorrections)));
+  }, [costCorrections, excludedRowKeys, parsedInput, year]);
 
   const currentAnalysis = analyses?.[methodId] ?? null;
   const fx = useMemo(() => fxForTaxYear(year), [year]);
@@ -2520,8 +2945,18 @@ export default function App() {
     });
   }
 
-  function updateManualCost(id, value) {
-    setManualCosts((current) => ({ ...current, [id]: value }));
+  function submitCostCorrection(id, value) {
+    if (!id || !isValidManualCostValue(value)) return;
+    setCostCorrections((current) => ({ ...current, [id]: value }));
+  }
+
+  function clearCostCorrection(id) {
+    setCostCorrections((current) => {
+      if (!Object.prototype.hasOwnProperty.call(current, id)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
   }
 
   async function runAnalysis(manualCostOverrides = {}) {
@@ -2544,11 +2979,13 @@ export default function App() {
       const manualCostInputs = Object.entries(effectiveManualCosts)
         .filter(([, value]) => isValidManualCostValue(value))
         .map(([id, value]) => ({ id, costBasis: Number(String(value).trim()) }));
+      const costCorrectionInputs = costCorrectionInputsFromState(costCorrections);
       const result = await analyzeUploadedFiles({
         files,
         taxYear: year,
         password,
         manualCosts: manualCostInputs,
+        costCorrections: costCorrectionInputs,
         excludedKeys: excludedRowKeys,
       });
       setParsedInput(result.parsedInput);
@@ -2609,11 +3046,16 @@ export default function App() {
     const text = [
       `海外证券资本利得税申报底稿 · 纳税年度 ${year}`,
       `计算口径：${best.label}${isTie ? "（两种成本法税额一致）" : "（推荐，税负最优）"}`,
-      `已实现资本利得：¥${fmt(best.summary.capitalGain)}`,
-      `分红收入（税后）：¥${fmt(best.summary.dividend)}`,
-      `应税所得合计：¥${fmt(best.summary.taxable)}`,
+      `已实现资本盈亏：¥${fmt(best.summary.capitalGain)}`,
+      `资本利得应税基数：¥${fmt(best.summary.capitalTaxBase)}`,
+      `分红净入账（税后）：¥${fmt(best.summary.dividend)}`,
+      `分红税前应税基数：¥${fmt(best.summary.dividendTaxBase)}`,
+      `应税基数合计：¥${fmt(best.summary.taxable)}`,
       "适用税率：20%",
-      `应缴资本利得税：¥${fmt(best.summary.tax)}`,
+      `抵免前税额：¥${fmt(best.summary.taxable * TAX_RATE)}`,
+      `分红预提税抵免：¥${fmt(best.summary.dividendWithholdingCredit)}`,
+      `预估应补税额：¥${fmt(best.summary.tax)}`,
+      "说明：资本亏损不抵减分红应税基数。",
       isTie ? "自然年 FIFO 与自然年 ACB 税额一致" : `对比${other.label}应缴 ¥${fmt(other.summary.tax)}，可节省 ¥${fmt(saving)}`,
       `年末汇率：USD ${fx.US.toFixed(4)} / HKD ${fx.HK.toFixed(4)}（${fx.date} ${fx.source}）`,
     ].join("\n");
@@ -2691,8 +3133,10 @@ export default function App() {
           password={password}
           onPasswordChange={setPassword}
           manualCosts={manualCosts}
-          onManualCostChange={updateManualCost}
+          costCorrections={costCorrections}
           onSubmitManualCost={submitManualCost}
+          onSubmitCostCorrection={submitCostCorrection}
+          onClearCostCorrection={clearCostCorrection}
           dividends={dividends}
           tradeActivities={tradeActivities}
           excludedRecords={excludedRecords}
@@ -2733,13 +3177,13 @@ export default function App() {
           request={activeCostRequest}
           value={manualCosts[activeCostRequest.id] ?? ""}
           analysisStatus={analysisStatus}
-          onChange={updateManualCost}
           onSubmit={submitManualCost}
           onClose={closeCostBasisModal}
         />
       ) : null}
       {showIntro ? <ProjectIntroModal onStart={startTour} onClose={() => setShowIntro(false)} /> : null}
       {tourStep >= 0 ? <GuidedTour stepIndex={tourStep} steps={TOUR_STEPS} onNext={nextTourStep} onBack={previousTourStep} onClose={closeTour} /> : null}
+      {isMobileDevice ? <MobileUnsupportedOverlay /> : null}
     </>
   );
 }
