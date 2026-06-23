@@ -1,4 +1,5 @@
 import { emptyParsedInput } from "@/lib/tax/calculator";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type {
   Currency,
   DividendIncome,
@@ -129,6 +130,9 @@ type EventRecord =
       code: string;
       name: string;
       quantity: number;
+      unitPrice: number;
+      grossAmount: number;
+      fee: number;
       cash: number;
       source: string;
       note: string;
@@ -223,13 +227,13 @@ function hasDateAtStart(line: TextLine) {
 
 async function extractPdfLines(fileName: string, data: ArrayBuffer, password?: string) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(data),
     password,
-    disableWorker: true,
     disableFontFace: true,
     isEvalSupported: false,
-  } as Parameters<typeof pdfjs.getDocument>[0] & { disableWorker: boolean });
+  } as Parameters<typeof pdfjs.getDocument>[0]);
   const document = await loadingTask.promise;
   const pages: TextLine[][] = [];
 
@@ -601,6 +605,9 @@ function buildTradeActivities(events: EventRecord[]): TradeActivity[] {
     securityName: event.name,
     side: event.kind,
     quantity: event.quantity,
+    unitPrice: "unitPrice" in event ? event.unitPrice : undefined,
+    grossAmount: "grossAmount" in event ? event.grossAmount : undefined,
+    fee: "fee" in event ? event.fee : undefined,
     amount: activityAmount(event),
     source: event.source,
     note: event.note,
@@ -718,6 +725,9 @@ function buildRealizedTrades(raw: LongbridgeRawData): {
       code: trade.code,
       name: trade.name,
       quantity: trade.quantity,
+      unitPrice: trade.avgPrice,
+      grossAmount: trade.tradeAmount,
+      fee: Math.abs(Math.abs(trade.cashChange) - Math.abs(trade.tradeAmount)),
       cash: trade.cashChange,
       source: "股票交易流水",
       note: trade.orderId,

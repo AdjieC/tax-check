@@ -50,6 +50,9 @@ export interface TradeActivity {
   securityName: string;
   side: TradeActivitySide;
   quantity: number;
+  unitPrice?: number;
+  grossAmount?: number;
+  fee?: number;
   amount: number;
   source: string;
   note?: string;

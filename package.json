@@ -1,30 +1,21 @@
 {
-  "name": "tax-check",
+  "name": "taxcheck-open-design-react",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "lucide-react": "^0.468.0",
-    "next": "^15.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
     "pdfjs-dist": "^4.10.38",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "xlsx": "^0.18.5",
-    "zod": "^3.24.1"
+    "vite": "^6.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.468.0",
+    "xlsx": "^0.18.5"
   },
-  "devDependencies": {
-    "@types/node": "^22.10.2",
-    "@types/react": "^19.0.2",
-    "@types/react-dom": "^19.0.2",
-    "eslint": "^9.17.0",
-    "eslint-config-next": "^15.1.0",
-    "typescript": "^5.7.2"
-  }
+  "devDependencies": {}
 }

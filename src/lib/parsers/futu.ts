@@ -5,6 +5,7 @@ import type {
   CostBasisRequest,
   Currency,
   DividendIncome,
+  OpenPosition,
   ParsedInput,
   RealizedTrade,
   ReviewIssue,
@@ -90,14 +91,18 @@ type FutuEvent =
       symbol: string;
       securityName: string;
       quantity: number;
+      unitPrice: number;
+      grossAmount: number;
+      fee: number;
       cash: number;
       source: string;
       note: string;
     };
 
-const REQUIRED_SHEETS = ["账户信息", "证券-交易流水", "证券-资产进出", "证券-资金进出"];
+const REQUIRED_SHEETS = ["账户信息", "证券-持仓总览", "证券-交易流水", "证券-资产进出", "证券-资金进出"];
 const REQUIRED_HEADERS: Record<string, string[]> = {
   账户信息: ["姓名", "牛牛号", "账户号码", "账户名称", "年份"],
+  "证券-持仓总览": ["时期类型", "日期", "代码名称", "交易所/市场", "币种", "数量/面值", "价格", "市值"],
   "证券-交易流水": ["成交时间", "代码名称", "交易所/市场", "方向", "币种", "数量/面值", "变动金额"],
   "证券-资产进出": ["日期", "代码名称", "交易所/市场", "方向", "类型", "币种", "数量", "备注"],
   "证券-资金进出": ["日期", "类型", "方向", "币种", "变动金额", "备注"],
@@ -242,6 +247,9 @@ function buildTradeActivities(events: FutuEvent[]): TradeActivity[] {
     securityName: event.securityName,
     side: event.kind === "acquire" ? "acquire" : event.kind,
     quantity: event.quantity,
+    unitPrice: "unitPrice" in event ? event.unitPrice : undefined,
+    grossAmount: "grossAmount" in event ? event.grossAmount : undefined,
+    fee: "fee" in event ? event.fee : undefined,
     amount: activityAmount(event),
     source: event.source,
     note: event.note,
@@ -344,7 +352,13 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
       if (!isBuy && !isSell) continue;
       const symbol = normalizeSymbol(row["代码名称"]);
       const quantity = Math.abs(asNumber(row["数量/面值"]));
+      const unitPrice = Math.abs(asNumber(row["价格"]));
+      const grossAmountFromColumn = Math.abs(asNumber(row["成交金额"]));
       const cash = asNumber(row["变动金额"]);
+      const grossAmount = grossAmountFromColumn || quantity * unitPrice;
+      const explicitFee = Math.abs(asNumber(row["总费用"]));
+      const impliedFee = grossAmount ? Math.abs(Math.abs(cash) - grossAmount) : 0;
+      const fee = explicitFee || impliedFee;
       if (!symbol || quantity <= 0) continue;
       events.push({
         kind: isBuy ? "buy" : "sell",
@@ -356,6 +370,9 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
         symbol,
         securityName: securityName(symbol),
         quantity,
+        unitPrice,
+        grossAmount,
+        fee,
         cash,
         source: sourceId(context.fileName, index + 2),
         note: side,
@@ -568,6 +585,54 @@ function manualCostMap(manualCosts: ManualCostInput[] = []) {
   return costs;
 }
 
+function parseOpenPositions(contexts: WorkbookContext[], targetYear: number): OpenPosition[] {
+  const positions = new Map<string, OpenPosition>();
+
+  for (const context of contexts) {
+    const rows = readRows(context.workbook, "证券-持仓总览");
+    const headers = rows[0] ?? [];
+    for (const [index, values] of rows.slice(1).entries()) {
+      const row = rowObject(headers, values);
+      const periodType = String(row["时期类型"] ?? "");
+      const category = String(row["品类"] ?? "");
+      const asOf = normalizeFutuDate(row["日期"]);
+      const symbol = normalizeSymbol(row["代码名称"]);
+      const quantity = asNumber(row["数量/面值"]);
+      const price = asNumber(row["价格"]);
+      const multiplier = asNumber(row["乘数"]) || 1;
+      const marketValue = asNumber(row["市值"]) || quantity * price * multiplier;
+      if (!periodType.includes("期末")) continue;
+      if (category && category !== "证券") continue;
+      if (!asOf.startsWith(String(targetYear)) || !symbol || quantity <= 0) continue;
+
+      const currency = asCurrency(row["币种"]);
+      const key = `${currency}::${symbol}`;
+      const existing = positions.get(key);
+      if (existing) {
+        existing.quantity += quantity;
+        existing.marketValue += marketValue;
+        continue;
+      }
+
+      positions.set(key, {
+        id: `futu-open-${targetYear}-${currency}-${symbol}`,
+        broker: "富途",
+        asOf,
+        market: marketName(row["交易所/市场"]),
+        currency,
+        symbol,
+        securityName: securityName(symbol),
+        quantity,
+        marketValue,
+        source: sourceId(context.fileName, index + 2),
+        note: "富途证券-持仓总览期末持仓；未提供历史成本时仅展示期末估值。",
+      });
+    }
+  }
+
+  return Array.from(positions.values());
+}
+
 export function parseFutuWorkbooks(files: FutuFileInput[], manualCosts: ManualCostInput[] = []): ParsedInput {
   const parsed = emptyParsedInput();
   const contexts = files.map((file) => {
@@ -589,6 +654,7 @@ export function parseFutuWorkbooks(files: FutuFileInput[], manualCosts: ManualCo
   parsed.realizedTrades.push(...realized.trades);
   parsed.tradeActivities.push(...buildTradeActivities(events));
   parsed.dividends.push(...parseDividends(contexts).filter((dividend) => dividend.date.startsWith(String(targetYear))));
+  parsed.openPositions.push(...parseOpenPositions(contexts, targetYear));
   parsed.issues.push(...realized.issues);
   parsed.costBasisRequests.push(...realized.costBasisRequests);
 
