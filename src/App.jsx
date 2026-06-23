@@ -280,6 +280,10 @@ function isValidManualCostValue(value) {
   return Number.isFinite(numericValue) && numericValue >= 0;
 }
 
+function needsLongbridgePassword(files) {
+  return files.some((file) => file.file && file.broker === "longbridge" && /\.pdf$/i.test(file.name));
+}
+
 function brokerLabel(broker) {
   return broker === "longbridge" ? "长桥" : "富途";
 }
@@ -2419,6 +2423,19 @@ export default function App() {
   }
 
   async function runAnalysis(manualCostOverrides = {}) {
+    if (needsLongbridgePassword(files) && !password.trim()) {
+      setPage("workbench");
+      setAnalysisStatus("idle");
+      pushManualIssue({
+        id: "longbridge-password-required",
+        severity: "warning",
+        title: "请填写长桥 PDF 密码",
+        detail: "检测到长桥 PDF 月结单。请在左侧「长桥 PDF 密码」中填写手机号后四位 + 身份证后四位，然后再点击解析并计算。",
+        action: "upload",
+      });
+      return;
+    }
+
     setAnalysisStatus("running");
     try {
       const effectiveManualCosts = { ...manualCosts, ...manualCostOverrides };
