@@ -363,24 +363,31 @@ function classForNumber(n) {
   return n >= 0 ? "pos" : "neg";
 }
 
-function isValidManualCostValue(value) {
+function parseManualCostValue(value) {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : null;
   const trimmed = String(value ?? "").trim();
-  if (!trimmed) return false;
-  const numericValue = Number(trimmed);
-  return Number.isFinite(numericValue) && numericValue >= 0;
+  if (!trimmed) return null;
+  const normalized = trimmed.replace(/[\s,，_]/g, "");
+  if (!/^\+?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?$/i.test(normalized)) return null;
+  const numericValue = Number(normalized);
+  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : null;
+}
+
+function isValidManualCostValue(value) {
+  return parseManualCostValue(value) !== null;
 }
 
 function costInputToTotalCost(value, mode, quantity) {
-  if (!isValidManualCostValue(value)) return null;
-  const numericValue = Number(String(value).trim());
+  const numericValue = parseManualCostValue(value);
+  if (numericValue === null) return null;
   if (mode === "unit" && (!Number.isFinite(quantity) || quantity <= 0)) return null;
   const totalCost = mode === "unit" ? numericValue * quantity : numericValue;
   return Number(totalCost.toFixed(2));
 }
 
 function totalCostToInputValue(totalCost, mode, quantity) {
-  if (!isValidManualCostValue(totalCost)) return "";
-  const numericValue = Number(String(totalCost).trim());
+  const numericValue = parseManualCostValue(totalCost);
+  if (numericValue === null) return "";
   if (mode === "unit" && Number.isFinite(quantity) && quantity > 0) return (numericValue / quantity).toFixed(2);
   return String(numericValue);
 }
@@ -394,6 +401,7 @@ function switchCostInputMode(value, currentMode, nextMode, quantity) {
 function limitDecimalPlaces(value, digits = 2) {
   const text = String(value ?? "");
   if (!text) return "";
+  if (/[eE]/.test(text)) return text.replace(/[^\d.eE+\-,，]/g, "");
   const cleaned = text.replace(/[^\d.]/g, "");
   const dotIndex = cleaned.indexOf(".");
   if (dotIndex === -1) return cleaned;
@@ -416,8 +424,8 @@ function costInputPlaceholder(mode) {
 
 function costCorrectionInputsFromState(costCorrections) {
   return Object.entries(costCorrections)
-    .filter(([, value]) => isValidManualCostValue(value))
-    .map(([id, value]) => ({ id, costBasis: Number(String(value).trim()) }));
+    .map(([id, value]) => ({ id, costBasis: parseManualCostValue(value) }))
+    .filter((item) => item.costBasis !== null);
 }
 
 function needsLongbridgePassword(files) {
@@ -1184,7 +1192,7 @@ function PnlDetailRow({
                   if (totalCost !== null) onSubmitManualCost(request.id, String(totalCost));
                 }}
               >
-                <Calculator /> {analysisStatus === "running" ? "重算中..." : "确认并重算"}
+                <Calculator /> 确认并重算
               </button>
             </div>
           </div>
@@ -2598,7 +2606,7 @@ function CostBasisModal({ request, value, analysisStatus, onSubmit, onClose }) {
               稍后填写
             </button>
             <button className="btn primary" type="submit" disabled={!canSubmit}>
-              <Calculator /> {analysisStatus === "running" ? "重算中..." : "确认并重算"}
+              <Calculator /> 确认并重算
             </button>
           </div>
         </form>
@@ -2969,8 +2977,8 @@ export default function App() {
     try {
       const effectiveManualCosts = { ...manualCosts, ...manualCostOverrides };
       const manualCostInputs = Object.entries(effectiveManualCosts)
-        .filter(([, value]) => isValidManualCostValue(value))
-        .map(([id, value]) => ({ id, costBasis: Number(String(value).trim()) }));
+        .map(([id, value]) => ({ id, costBasis: parseManualCostValue(value) }))
+        .filter((item) => item.costBasis !== null);
       const costCorrectionInputs = costCorrectionInputsFromState(costCorrections);
       const result = await analyzeUploadedFiles({
         files,
