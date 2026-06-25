@@ -199,6 +199,37 @@ function currencyToMarket(currency, market) {
   return marketCodeFromText(market);
 }
 
+function isUnresolvedSymbol(symbol) {
+  return String(symbol ?? "").startsWith("UNRESOLVED-");
+}
+
+function displayRowCode(code) {
+  return isUnresolvedSymbol(code) ? "待补代码" : code;
+}
+
+function securityAliasStateKey(row) {
+  return `${row.broker}::${row.currency}::${row.name}`;
+}
+
+function normalizeSecuritySymbolInput(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+}
+
+function securityAliasInputsFromState(securityAliases) {
+  return Object.values(securityAliases ?? {})
+    .map((item) => ({
+      name: String(item.name ?? "").trim(),
+      symbol: normalizeSecuritySymbolInput(item.symbol),
+      market: item.market,
+      currency: item.currency,
+    }))
+    .filter((item) => item.name && item.symbol);
+}
+
 function rowsFromAnalysis(analysis) {
   if (!analysis) return [];
   const rows = analysis.symbols.map((symbol) => {
@@ -245,7 +276,32 @@ function rowsFromAnalysis(analysis) {
       };
     })
     .filter(Boolean);
-  return [...missingRows, ...rows];
+  const occupiedKeys = new Set([...existingKeys, ...missingRows.map((row) => row.key)]);
+  const positionRows = (analysis.openPositions ?? [])
+    .map((position) => {
+      const key = `${position.broker}::${position.currency}::${position.symbol}`;
+      if (occupiedKeys.has(key)) return null;
+      const market = currencyToMarket(position.currency, position.market);
+      const unrealized = Number.isFinite(position.unrealizedGainLoss) ? position.unrealizedGainLoss : null;
+      return {
+        key,
+        broker: position.broker,
+        market,
+        code: position.symbol,
+        name: position.securityName,
+        currency: position.currency,
+        quantity: position.quantity,
+        proceeds: position.marketValue,
+        costBasis: position.costBasis ?? null,
+        pnlOriginal: unrealized,
+        rmb: unrealized === null ? null : unrealized * (analysis.config.fxRates[position.currency] ?? 1),
+        positionOnly: true,
+        position,
+        transactions: [],
+      };
+    })
+    .filter(Boolean);
+  return [...missingRows, ...rows, ...positionRows];
 }
 
 function dividendsFromAnalysis(analysis) {
@@ -428,8 +484,8 @@ function costCorrectionInputsFromState(costCorrections) {
     .filter((item) => item.costBasis !== null);
 }
 
-function needsLongbridgePassword(files) {
-  return files.some((file) => file.file && file.broker === "longbridge" && /\.pdf$/i.test(file.name));
+function needsBrokerPdfPassword(files) {
+  return files.some((file) => file.file && ["longbridge", "zircon"].includes(file.broker) && /\.pdf$/i.test(file.name));
 }
 
 function detectMobileDevice() {
@@ -463,12 +519,15 @@ function useIsMobileDevice() {
 
 function brokerLabel(broker) {
   if (broker === "tiger") return "老虎";
-  return broker === "longbridge" ? "长桥" : "富途";
+  if (broker === "longbridge") return "长桥";
+  if (broker === "zircon") return "卓锐";
+  return "富途";
 }
 
 const BROKER_OPTIONS = [
   { value: "futu", label: "富途" },
   { value: "longbridge", label: "长桥" },
+  { value: "zircon", label: "卓锐" },
   { value: "tiger", label: "老虎" },
 ];
 const TAX_YEAR_OPTIONS = [2021, 2022, 2023, 2024, 2025];
@@ -520,6 +579,7 @@ const LONGBRIDGE_TEXT_MARKERS = [
   "lbhk",
 ];
 const TIGER_TEXT_MARKERS = ["Tiger Brokers", "Tiger Brokers (NZ)", "老虎", "活动报表", "Tax Form Record", "Key Tax Figures"];
+const ZIRCON_TEXT_MARKERS = ["卓锐", "卓銳", "Zircon Securities"];
 
 function brokerConfidenceLabel(confidence) {
   if (confidence === "manual") return "手动选择";
@@ -586,6 +646,13 @@ function baseBrokerGuess(fileName) {
       broker: "longbridge",
       confidence: "high",
       reason: "文件名包含长桥特征，已默认选择长桥。",
+    };
+  }
+  if (fileName.includes("卓锐") || fileName.includes("卓銳") || lower.includes("zircon")) {
+    return {
+      broker: "zircon",
+      confidence: "high",
+      reason: "文件名包含卓锐/Zircon 特征，已默认选择卓锐。",
     };
   }
   if (fileName.includes("老虎") || lower.includes("tiger")) {
@@ -668,6 +735,13 @@ async function detectBrokerFromFile(file) {
           reason: "文件内容包含老虎/Tiger 特征；当前老虎解析器支持 PDF 税表汇总和活动报表。",
         };
       }
+      if (hasAnyMarker(preview, ZIRCON_TEXT_MARKERS)) {
+        return {
+          broker: "zircon",
+          confidence: "medium",
+          reason: "文件内容包含卓锐/Zircon 特征；当前卓锐解析器支持 PDF 月结单，请解析前确认文件格式。",
+        };
+      }
     }
 
     if (isPdfFile(file.name)) {
@@ -684,6 +758,13 @@ async function detectBrokerFromFile(file) {
           broker: "longbridge",
           confidence: "high",
           reason: "PDF 内容包含长桥特征，已默认选择长桥。",
+        };
+      }
+      if (hasAnyMarker(preview, ZIRCON_TEXT_MARKERS)) {
+        return {
+          broker: "zircon",
+          confidence: "high",
+          reason: "PDF 内容包含卓锐/Zircon 月结单特征，已默认选择卓锐。",
         };
       }
       if (hasAnyMarker(preview, FUTU_TEXT_MARKERS)) {
@@ -1032,7 +1113,7 @@ function Sidebar({
               <Upload />
             </span>
             <p>拖入或点击上传券商文件</p>
-            <span>支持富途 Excel / 长桥 PDF / 老虎 PDF · .xlsx .xls .pdf</span>
+            <span>支持富途 Excel / 长桥 PDF / 卓锐 PDF / 老虎 PDF · .xlsx .xls .pdf</span>
           </button>
           <ul className="filelist">
             {files.map((file) => (
@@ -1065,8 +1146,8 @@ function Sidebar({
             ))}
           </ul>
           <label className="field-label">
-            <span>长桥 PDF 密码</span>
-            <input className="plain-input" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="手机号后四位 + 身份证后四位" />
+            <span>PDF 月结单密码</span>
+            <input className="plain-input" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="长桥/卓锐 PDF 密码" />
           </label>
           <button className="btn primary full-btn" type="button" onClick={() => onAnalyze()} disabled={analysisStatus === "running"} data-tour-id="analyze-button">
             <Calculator /> {analysisStatus === "running" ? "解析中…" : "解析并计算"}
@@ -1098,7 +1179,9 @@ function PnlTable({
   summary,
   manualCosts,
   costCorrections,
+  securityAliases,
   onSubmitManualCost,
+  onSubmitSecurityAlias,
   onSubmitCostCorrection,
   onClearCostCorrection,
   analysisStatus,
@@ -1217,27 +1300,41 @@ function PnlTable({
               const isOpen = openRow === row.key;
               return (
                 <React.Fragment key={row.key}>
-                  <tr key={row.key} className={`stock-row ${isOpen ? "open" : ""}`} onClick={() => setOpenRow(isOpen ? null : row.key)}>
+                  <tr
+                    key={row.key}
+                    className={`stock-row ${isOpen ? "open" : ""} ${row.positionOnly ? "position-only-row" : ""}`}
+                    onClick={() => setOpenRow(isOpen ? null : row.key)}
+                  >
                     <td>
                       <Market market={row.market} />
                     </td>
-                    <td className="code-cell">{row.code}</td>
+                    <td className="code-cell">{displayRowCode(row.code)}</td>
                     <td className="stock-nm">
                       <ChevronRight className="caret" />
                       {row.name}
+                      {row.positionOnly ? <span className="row-state-badge">期末持仓</span> : null}
+                      {isUnresolvedSymbol(row.code) ? <span className="row-state-badge warn">代码待复核</span> : null}
                     </td>
                     <td className="c">
                       <span className="ccy">{row.currency}</span>
                     </td>
-                    <td className={`r num pnl ${row.missingCost ? "" : classForNumber(row.pnlOriginal)}`}>
-                      {row.missingCost ? `${row.currency} ${fmt(row.proceeds)}` : cnSigned(row.pnlOriginal)}
+                    <td className={`r num pnl ${row.missingCost || row.positionOnly ? "" : classForNumber(row.pnlOriginal)}`}>
+                      {row.missingCost
+                        ? `${row.currency} ${fmt(row.proceeds)}`
+                        : row.positionOnly
+                          ? row.pnlOriginal === null
+                            ? "期末持仓"
+                            : `未实现 ${cnSigned(row.pnlOriginal)}`
+                          : cnSigned(row.pnlOriginal)}
                     </td>
                     <td className="r num muted">{(fx[row.market] ?? 1).toFixed(4)}</td>
-                    <td className={`r num pnl ${row.missingCost ? "pending-text" : classForNumber(row.rmb)}`}>
+                    <td className={`r num pnl ${row.missingCost || row.positionOnly ? "pending-text" : classForNumber(row.rmb)}`}>
                       {row.missingCost ? (
                         <span key={`${row.key}-${pendingCostFlashToken}`} className={`pending-cost-label ${pendingCostFlashToken ? "pending-flash" : ""}`}>
                           待补成本
                         </span>
+                      ) : row.positionOnly ? (
+                        "不参与计算"
                       ) : (
                         cnSigned(row.rmb)
                       )}
@@ -1250,7 +1347,9 @@ function PnlTable({
                       method={method}
                       manualCosts={manualCosts}
                       costCorrections={costCorrections}
+                      securityAliases={securityAliases}
                       onSubmitManualCost={onSubmitManualCost}
+                      onSubmitSecurityAlias={onSubmitSecurityAlias}
                       onSubmitCostCorrection={onSubmitCostCorrection}
                       onClearCostCorrection={onClearCostCorrection}
                       analysisStatus={analysisStatus}
@@ -1274,13 +1373,56 @@ function PnlTable({
   );
 }
 
+function SymbolAliasForm({ row, securityAliases = {}, onSubmitSecurityAlias, analysisStatus }) {
+  const aliasKey = securityAliasStateKey(row);
+  const savedSymbol = securityAliases[aliasKey]?.symbol ?? "";
+  const [draftSymbol, setDraftSymbol] = useState(savedSymbol);
+  const needsAlias = isUnresolvedSymbol(row.code);
+
+  useEffect(() => {
+    setDraftSymbol(savedSymbol);
+  }, [aliasKey, savedSymbol]);
+
+  if (!needsAlias) return null;
+
+  const normalized = normalizeSecuritySymbolInput(draftSymbol);
+  const canSubmit = Boolean(normalized) && analysisStatus !== "running";
+  return (
+    <form
+      className="symbol-alias-form"
+      onClick={(event) => event.stopPropagation()}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) onSubmitSecurityAlias?.(row, normalized);
+      }}
+    >
+      <label>
+        <span>股票代码</span>
+        <input
+          className="plain-input"
+          value={draftSymbol}
+          onChange={(event) => setDraftSymbol(normalizeSecuritySymbolInput(event.target.value))}
+          placeholder="例如 NVDA / PDD / 09988"
+          aria-label={`${row.name} 股票代码`}
+        />
+      </label>
+      <button className="btn primary" type="submit" disabled={!canSubmit}>
+        <Check /> 保存并重算
+      </button>
+      <span className="dh-note">PDF 文本层没有可读代码时，可在这里补充；后续会按该代码重新归集买卖、持仓和待补成本。</span>
+    </form>
+  );
+}
+
 function PnlDetailRow({
   row,
   idx,
   method,
   manualCosts,
   costCorrections = {},
+  securityAliases = {},
   onSubmitManualCost,
+  onSubmitSecurityAlias,
   onSubmitCostCorrection,
   onClearCostCorrection,
   analysisStatus,
@@ -1302,13 +1444,19 @@ function PnlDetailRow({
           <div className="detail-wrap">
             <div className="detail-head">
               <b>
-                {row.code} · {row.name}
+                {displayRowCode(row.code)} · {row.name}
               </b>{" "}
               成本缺失，暂未进入应税盈亏
               <span className="dh-note">
                 已识别 {request.sellDate} 卖出 {request.quantity.toLocaleString()} 股，收入 {request.currency} {fmt(request.proceeds)}。补入这批卖出对应的总成本或每股成本后，会重新生成 FIFO / ACB 结果。
               </span>
             </div>
+            <SymbolAliasForm
+              row={row}
+              securityAliases={securityAliases}
+              onSubmitSecurityAlias={onSubmitSecurityAlias}
+              analysisStatus={analysisStatus}
+            />
             <div className="inline-cost">
               <label>
                 <span>{costInputLabel(request.currency, missingCostMode)}</span>
@@ -1353,6 +1501,62 @@ function PnlDetailRow({
       </tr>
     );
   }
+  if (row.positionOnly) {
+    const position = row.position;
+    const avgCost = position?.quantity && Number.isFinite(position.costBasis) ? position.costBasis / position.quantity : null;
+    const lastPrice = position?.quantity ? position.marketValue / position.quantity : null;
+    return (
+      <tr className="detail-row">
+        <td colSpan="7">
+          <div className="detail-wrap">
+            <div className="detail-head">
+              <b>
+                {displayRowCode(row.code)} · {row.name}
+              </b>{" "}
+              期末持仓，不参与已实现盈亏计算
+              <span className="dh-note">该标的只有期末持仓或未实现盈亏；卖出发生后才会进入财产转让所得计算。</span>
+            </div>
+            <SymbolAliasForm
+              row={row}
+              securityAliases={securityAliases}
+              onSubmitSecurityAlias={onSubmitSecurityAlias}
+              analysisStatus={analysisStatus}
+            />
+            <div className="position-detail-grid">
+              <div>
+                <span>持仓数量</span>
+                <b>{position.quantity.toLocaleString()}</b>
+              </div>
+              <div>
+                <span>期末市值</span>
+                <b>
+                  {row.currency} {fmt(position.marketValue)}
+                </b>
+              </div>
+              <div>
+                <span>平均成本</span>
+                <b>{avgCost === null ? "N/A" : fmtUnit(avgCost)}</b>
+              </div>
+              <div>
+                <span>期末价格</span>
+                <b>{lastPrice === null ? "N/A" : fmtPrice(lastPrice)}</b>
+              </div>
+              <div>
+                <span>未实现盈亏</span>
+                <b className={row.pnlOriginal === null ? "" : classForNumber(row.pnlOriginal)}>
+                  {row.pnlOriginal === null ? "N/A" : cnSigned(row.pnlOriginal)}
+                </b>
+              </div>
+              <div>
+                <span>材料来源</span>
+                <b>{position.source}</b>
+              </div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    );
+  }
   const txns = row.transactions?.length ? row.transactions : txnsFor(idx, row);
   const isReal = Boolean(row.transactions?.length);
   return (
@@ -1361,11 +1565,17 @@ function PnlDetailRow({
         <div className="detail-wrap">
           <div className="detail-head">
             <b>
-              {row.code} · {row.name}
+              {displayRowCode(row.code)} · {row.name}
             </b>{" "}
             买卖流水（{row.currency}）
             <span className="dh-note">流水为各口径通用的原始材料；已实现盈亏按当前口径（{method.tag}）匹配成本后得出</span>
           </div>
+          <SymbolAliasForm
+            row={row}
+            securityAliases={securityAliases}
+            onSubmitSecurityAlias={onSubmitSecurityAlias}
+            analysisStatus={analysisStatus}
+          />
           <table className="txn-table">
             <thead>
               <tr>
@@ -1876,7 +2086,9 @@ function Workbench({
   onPasswordChange,
   manualCosts,
   costCorrections,
+  securityAliases,
   onSubmitManualCost,
+  onSubmitSecurityAlias,
   onSubmitCostCorrection,
   onClearCostCorrection,
   dividends,
@@ -1929,7 +2141,9 @@ function Workbench({
                 summary={summary}
                 manualCosts={manualCosts}
                 costCorrections={costCorrections}
+                securityAliases={securityAliases}
                 onSubmitManualCost={onSubmitManualCost}
+                onSubmitSecurityAlias={onSubmitSecurityAlias}
                 onSubmitCostCorrection={onSubmitCostCorrection}
                 onClearCostCorrection={onClearCostCorrection}
                 analysisStatus={analysisStatus}
@@ -2529,7 +2743,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、长桥 PDF 月结单或老虎 PDF 报表。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、长桥/卓锐 PDF 月结单或老虎 PDF 报表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -2607,7 +2821,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         <TaxCheckMark className="intro-brand-mark" />
         <h2 id="intro-title">TaxCheck 是什么</h2>
         <p>
-          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、长桥、老虎等券商。
+          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、长桥、卓锐、老虎等券商。
           <br />
           <br />
           <b>本工具承诺不保存任何你的财务数据，上传的文件仅在你本地解析使用。</b>
@@ -2618,6 +2832,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         <div className="intro-points">
           <span>富途 Excel 年度报表</span>
           <span>长桥 PDF 月结单</span>
+          <span>卓锐 PDF 月结单</span>
           <span>老虎 PDF 税表/活动报表</span>
           <span>申报数字与 PDF 底稿</span>
         </div>
@@ -2915,6 +3130,7 @@ export default function App() {
   const [analysisStatus, setAnalysisStatus] = useState("idle");
   const [password, setPassword] = useState("");
   const [manualCosts, setManualCosts] = useState({});
+  const [securityAliases, setSecurityAliases] = useState({});
   const [costCorrections, setCostCorrections] = useState({});
   const [copied, setCopied] = useState(false);
   const [showIntro, setShowIntro] = useState(true);
@@ -3126,15 +3342,15 @@ export default function App() {
     });
   }
 
-  async function runAnalysis(manualCostOverrides = {}) {
-    if (needsLongbridgePassword(files) && !password.trim()) {
+  async function runAnalysis(manualCostOverrides = {}, securityAliasOverrides = {}) {
+    if (needsBrokerPdfPassword(files) && !password.trim()) {
       setPage("workbench");
       setAnalysisStatus("idle");
       pushManualIssue({
-        id: "longbridge-password-required",
+        id: "pdf-password-required",
         severity: "warning",
-        title: "请填写长桥 PDF 密码",
-        detail: "检测到长桥 PDF 月结单。请在左侧「长桥 PDF 密码」中填写手机号后四位 + 身份证后四位，然后再点击解析并计算。",
+        title: "请填写 PDF 月结单密码",
+        detail: "检测到需要密码的 PDF 月结单。请在左侧「PDF 月结单密码」中填写对应券商的 PDF 密码，然后再点击解析并计算。",
         action: "upload",
       });
       return;
@@ -3143,15 +3359,18 @@ export default function App() {
     setAnalysisStatus("running");
     try {
       const effectiveManualCosts = { ...manualCosts, ...manualCostOverrides };
+      const effectiveSecurityAliases = { ...securityAliases, ...securityAliasOverrides };
       const manualCostInputs = Object.entries(effectiveManualCosts)
         .map(([id, value]) => ({ id, costBasis: parseManualCostValue(value) }))
         .filter((item) => item.costBasis !== null);
+      const securityAliasInputs = securityAliasInputsFromState(effectiveSecurityAliases);
       const costCorrectionInputs = costCorrectionInputsFromState(costCorrections);
       const result = await analyzeUploadedFiles({
         files,
         taxYear: year,
         password,
         manualCosts: manualCostInputs,
+        securityAliases: securityAliasInputs,
         costCorrections: costCorrectionInputs,
       });
       setParsedInput(result.parsedInput);
@@ -3184,17 +3403,37 @@ export default function App() {
     runAnalysis({ [id]: value });
   }
 
+  function submitSecurityAlias(row, symbol) {
+    const normalized = normalizeSecuritySymbolInput(symbol);
+    if (!row?.name || !normalized) return;
+    const key = securityAliasStateKey(row);
+    const nextAlias = {
+      name: row.name,
+      symbol: normalized,
+      market: row.market === "US" ? "美国市场" : row.market === "HK" ? "香港市场" : row.market,
+      currency: row.currency,
+    };
+    setSecurityAliases((current) => ({ ...current, [key]: nextAlias }));
+    runAnalysis({}, { [key]: nextAlias });
+  }
+
   function exportCsv() {
     const header = ["市场", "代码", "名称", "币种", "成本法", "盈亏原币", "折算汇率", "盈亏RMB"];
     const body = rows.map((row) => [
       row.market,
-      row.code,
+      displayRowCode(row.code),
       row.name,
       row.currency,
       methodById(methodId).label,
-      row.missingCost ? "待补成本" : row.pnlOriginal.toFixed(2),
+      row.missingCost
+        ? "待补成本"
+        : row.positionOnly
+          ? row.pnlOriginal === null
+            ? "期末持仓（不计入）"
+            : `未实现 ${row.pnlOriginal.toFixed(2)}（不计入）`
+          : row.pnlOriginal.toFixed(2),
       (fx[row.market] ?? 1).toFixed(4),
-      row.missingCost ? "" : row.rmb.toFixed(2),
+      row.missingCost || row.positionOnly ? "" : row.rmb.toFixed(2),
     ]);
     const csv = [header, ...body].map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
@@ -3310,7 +3549,9 @@ export default function App() {
           onPasswordChange={setPassword}
           manualCosts={manualCosts}
           costCorrections={costCorrections}
+          securityAliases={securityAliases}
           onSubmitManualCost={submitManualCost}
+          onSubmitSecurityAlias={submitSecurityAlias}
           onSubmitCostCorrection={submitCostCorrection}
           onClearCostCorrection={clearCostCorrection}
           dividends={dividends}

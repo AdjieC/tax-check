@@ -120,6 +120,13 @@ export interface ManualCostInput {
   costBasis: number;
 }
 
+export interface ManualSecurityAliasInput {
+  name: string;
+  symbol: string;
+  market?: string;
+  currency?: Currency;
+}
+
 interface MissingCostAggregate {
   id: string;
   broker: string;
@@ -156,6 +163,13 @@ interface PositionState {
   name: string;
   quantity: number;
   costBasis: number;
+}
+
+interface SecurityAlias {
+  code: string;
+  name: string;
+  market?: string;
+  currency?: Currency;
 }
 
 type EventRecord =
@@ -215,7 +229,7 @@ const ORDER_TIME_OVERRIDE: Record<string, string> = {
   OS20251230173008: "14:14:02",
 };
 
-const KNOWN_SECURITY_ALIASES: Record<string, { code: string; name: string; market?: string; currency?: Currency }> = {
+const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   "advanced micro devices": { code: "AMD", name: "AMD", market: "美国市场", currency: "USD" },
   amd: { code: "AMD", name: "AMD", market: "美国市场", currency: "USD" },
   "archer aviation": { code: "ACHR", name: "Archer Aviation", market: "美国市场", currency: "USD" },
@@ -239,6 +253,28 @@ const KNOWN_SECURITY_ALIASES: Record<string, { code: string; name: string; marke
   "kulr tech": { code: "KULR", name: "KULR Tech", market: "美国市场", currency: "USD" },
   microsoft: { code: "MSFT", name: "Microsoft", market: "美国市场", currency: "USD" },
   "micron tech": { code: "MU", name: "Micron Tech", market: "美国市场", currency: "USD" },
+  英伟达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
+  辉达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
+  拼多多: { code: "PDD", name: "拼多多", market: "美国市场", currency: "USD" },
+  台积电: { code: "TSM", name: "台积电", market: "美国市场", currency: "USD" },
+  阿里巴巴: { code: "BABA", name: "阿里巴巴", market: "美国市场", currency: "USD" },
+  联合健康: { code: "UNH", name: "联合健康", market: "美国市场", currency: "USD" },
+  苹果: { code: "AAPL", name: "Apple", market: "美国市场", currency: "USD" },
+  微软: { code: "MSFT", name: "Microsoft", market: "美国市场", currency: "USD" },
+  特斯拉: { code: "TSLA", name: "Tesla", market: "美国市场", currency: "USD" },
+  亚马逊: { code: "AMZN", name: "Amazon", market: "美国市场", currency: "USD" },
+  奈飞: { code: "NFLX", name: "Netflix", market: "美国市场", currency: "USD" },
+  博通: { code: "AVGO", name: "Broadcom", market: "美国市场", currency: "USD" },
+  高通: { code: "QCOM", name: "Qualcomm", market: "美国市场", currency: "USD" },
+  美光: { code: "MU", name: "Micron Tech", market: "美国市场", currency: "USD" },
+  超微电脑: { code: "SMCI", name: "Super Micro Computer", market: "美国市场", currency: "USD" },
+  百度: { code: "BIDU", name: "百度", market: "美国市场", currency: "USD" },
+  京东: { code: "JD", name: "京东", market: "美国市场", currency: "USD" },
+  网易: { code: "NTES", name: "网易", market: "美国市场", currency: "USD" },
+  哔哩哔哩: { code: "BILI", name: "哔哩哔哩", market: "美国市场", currency: "USD" },
+  蔚来: { code: "NIO", name: "蔚来", market: "美国市场", currency: "USD" },
+  小鹏: { code: "XPEV", name: "小鹏", market: "美国市场", currency: "USD" },
+  理想汽车: { code: "LI", name: "理想汽车", market: "美国市场", currency: "USD" },
   "pro ultr cvix shrt": { code: "UVXY", name: "ProShares Ultra VIX Short-Term Futures ETF", market: "美国市场", currency: "USD" },
   "pro ultr vix shrt": { code: "UVXY", name: "ProShares Ultra VIX Short-Term Futures ETF", market: "美国市场", currency: "USD" },
   "red cat": { code: "RCAT", name: "Red Cat", market: "美国市场", currency: "USD" },
@@ -359,7 +395,7 @@ function mapCurrency(value: string): Currency {
 function securityAliasKey(value: string) {
   return canonicalText(value)
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim()
     .replace(/\s+/g, " ");
 }
@@ -370,11 +406,22 @@ function isSecurityCodeCandidate(value: string) {
 }
 
 function fallbackSecurityCode(item: string) {
-  const normalized = securityAliasKey(item).toUpperCase().replace(/\s+/g, "-");
-  return normalized ? `UNRESOLVED-${normalized.slice(0, 32)}` : "UNRESOLVED-SECURITY";
+  const normalized = securityAliasKey(item);
+  const ascii = normalized.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (ascii) return `UNRESOLVED-${ascii.slice(0, 32)}`;
+
+  let hash = 0;
+  const hashSource = normalized || canonicalText(item);
+  for (const char of hashSource) {
+    hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  }
+  return hash ? `UNRESOLVED-${hash.toString(36).toUpperCase()}` : "UNRESOLVED-SECURITY";
 }
 
-function splitSecurity(item: string): {
+function splitSecurity(
+  item: string,
+  documentAliases: Map<string, SecurityAlias> = new Map(),
+): {
   code: string;
   name: string;
   codeResolution: "explicit" | "known_alias" | "name_fallback";
@@ -382,14 +429,15 @@ function splitSecurity(item: string): {
   currency?: Currency;
 } {
   const text = clean(item);
-  const alias = KNOWN_SECURITY_ALIASES[securityAliasKey(text)];
+  const aliasKey = securityAliasKey(text);
+  const alias = documentAliases.get(aliasKey) ?? KNOWN_SECURITY_ALIASES[aliasKey];
   if (alias) {
     return { ...alias, codeResolution: "known_alias" };
   }
 
   const [code = "", ...nameParts] = text.split(" ");
   if (isSecurityCodeCandidate(code)) {
-    const codeAlias = KNOWN_SECURITY_ALIASES[securityAliasKey(code)];
+    const codeAlias = documentAliases.get(securityAliasKey(code)) ?? KNOWN_SECURITY_ALIASES[securityAliasKey(code)];
     if (nameParts.length === 0 && codeAlias) {
       return { ...codeAlias, codeResolution: "known_alias" };
     }
@@ -516,6 +564,7 @@ function parseStockTradeLine(
   market: string,
   currency: Currency,
   sequence: number,
+  documentAliases: Map<string, SecurityAlias>,
 ): StockTradeRecord | null {
   if (!hasDateAtStart(line)) return null;
   const tradeDate = lineCell(line, 0, 76);
@@ -533,7 +582,7 @@ function parseStockTradeLine(
   }
   if (!side.includes("买") && !side.includes("卖")) return null;
 
-  const security = splitSecurity(item);
+  const security = splitSecurity(item, documentAliases);
   if (!security.code || !quantity || !avgPrice || !tradeAmount || !cashChange) return null;
   const inferredMarket = inferTradeMarket(item, security);
 
@@ -590,6 +639,7 @@ function parsePositionMoveLine(
   sourcePdf: string,
   line: TextLine,
   market: string,
+  documentAliases: Map<string, SecurityAlias>,
 ): PositionMoveRecord | null {
   if (!hasDateAtStart(line)) return null;
   const tokens = line.tokens;
@@ -615,7 +665,7 @@ function parsePositionMoveLine(
       : "";
 
   if (!DATE_RE.test(date) || !moveType || !item || !quantity) return null;
-  const security = splitSecurity(item);
+  const security = splitSecurity(item, documentAliases);
 
   return {
     sourcePdf,
@@ -635,6 +685,7 @@ function parsePortfolioLine(
   line: TextLine,
   market: string,
   currency: Currency,
+  documentAliases: Map<string, SecurityAlias>,
 ): PortfolioRecord | null {
   const item = lineCell(line, 0, 120);
   const canonicalItem = canonicalText(item);
@@ -654,7 +705,7 @@ function parsePortfolioLine(
     return null;
   }
 
-  const security = splitSecurity(item);
+  const security = splitSecurity(item, documentAliases);
   if (!market && security.codeResolution === "name_fallback") return null;
   if (!security.code) return null;
   const inferredMarket = inferTradeMarket(item, security);
@@ -676,7 +727,43 @@ function parsePortfolioLine(
   };
 }
 
-function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeRawData {
+function addDocumentSecurityAlias(
+  aliases: Map<string, SecurityAlias>,
+  security: { code: string; name: string; market?: string; currency?: Currency },
+) {
+  if (!security.code || security.code.startsWith("UNRESOLVED-")) return;
+  const nameKey = securityAliasKey(security.name);
+  const codeKey = securityAliasKey(security.code);
+  if (!nameKey || nameKey === codeKey) return;
+  aliases.set(nameKey, {
+    code: security.code,
+    name: security.name,
+    market: security.market,
+    currency: security.currency,
+  });
+}
+
+function manualSecurityAliasMap(manualAliases: ManualSecurityAliasInput[] = []) {
+  const aliases = new Map<string, SecurityAlias>();
+  for (const item of manualAliases) {
+    const name = clean(canonicalText(item.name ?? ""));
+    const symbol = normalizeCode(clean(canonicalText(item.symbol ?? "")));
+    if (!name || !symbol || symbol.startsWith("UNRESOLVED-")) continue;
+    aliases.set(securityAliasKey(name), {
+      code: symbol,
+      name,
+      market: item.market,
+      currency: item.currency,
+    });
+  }
+  return aliases;
+}
+
+function parseLongbridgeLines(
+  sourcePdf: string,
+  lines: TextLine[],
+  manualAliases: ManualSecurityAliasInput[] = [],
+): LongbridgeRawData {
   const raw: LongbridgeRawData = {
     trades: [],
     cashFlows: [],
@@ -695,6 +782,7 @@ function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeR
   let portfolioCurrency: Currency = "HKD";
   let sequence = 0;
   const fallbackSecurityNames = new Map<string, string>();
+  const documentSecurityAliases = manualSecurityAliasMap(manualAliases);
 
   for (const line of lines) {
     const text = canonicalText(line.text);
@@ -743,10 +831,16 @@ function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeR
     }
 
     if (activeTable === "stock_trade" || /\bOS\d+/.test(text)) {
-      const trade = parseStockTradeLine(sourcePdf, line, tradeMarket, tradeCurrency, sequence);
+      const trade = parseStockTradeLine(sourcePdf, line, tradeMarket, tradeCurrency, sequence, documentSecurityAliases);
       if (trade) {
         activeTable = "stock_trade";
         raw.trades.push(trade);
+        addDocumentSecurityAlias(documentSecurityAliases, {
+          code: trade.code,
+          name: trade.name,
+          market: trade.market,
+          currency: trade.currency,
+        });
         if (trade.codeResolution === "name_fallback") {
           fallbackSecurityNames.set(trade.code, trade.name);
         }
@@ -763,22 +857,26 @@ function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeR
     }
 
     if (activeTable === "position_move") {
-      const move = parsePositionMoveLine(sourcePdf, line, moveMarket);
+      const move = parsePositionMoveLine(sourcePdf, line, moveMarket, documentSecurityAliases);
       if (move) raw.moves.push(move);
       continue;
     }
 
     if (activeTable === "none") {
-      const position = parsePortfolioLine(sourcePdf, line, portfolioMarket, portfolioCurrency);
+      const position = parsePortfolioLine(sourcePdf, line, portfolioMarket, portfolioCurrency, documentSecurityAliases);
       if (position) {
         raw.positions.push(position);
+        addDocumentSecurityAlias(documentSecurityAliases, position);
         continue;
       }
     }
 
     if (activeTable === "portfolio") {
-      const position = parsePortfolioLine(sourcePdf, line, portfolioMarket, portfolioCurrency);
-      if (position) raw.positions.push(position);
+      const position = parsePortfolioLine(sourcePdf, line, portfolioMarket, portfolioCurrency, documentSecurityAliases);
+      if (position) {
+        raw.positions.push(position);
+        addDocumentSecurityAlias(documentSecurityAliases, position);
+      }
     }
   }
 
@@ -1303,7 +1401,7 @@ function buildOpenPositions(raw: LongbridgeRawData): OpenPosition[] {
 export async function parseLongbridgePdfs(
   files: LongbridgeFileInput[],
   password?: string,
-  options: { targetYear?: number; manualCosts?: ManualCostInput[] } = {},
+  options: { targetYear?: number; manualCosts?: ManualCostInput[]; securityAliases?: ManualSecurityAliasInput[] } = {},
 ): Promise<ParsedInput> {
   const parsed = emptyParsedInput();
   const raw: LongbridgeRawData = {
@@ -1318,7 +1416,7 @@ export async function parseLongbridgePdfs(
   for (const file of files) {
     try {
       const lines = await extractPdfLines(file.name, file.data, password);
-      const fileRaw = parseLongbridgeLines(file.name, lines);
+      const fileRaw = parseLongbridgeLines(file.name, lines, options.securityAliases ?? []);
       await attachDividendScreenshots(file.name, file.data, password, fileRaw.cashFlows);
       raw.trades.push(...fileRaw.trades);
       raw.cashFlows.push(...fileRaw.cashFlows);

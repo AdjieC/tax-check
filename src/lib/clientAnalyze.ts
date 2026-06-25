@@ -5,12 +5,13 @@ import {
 } from "@/lib/tax/calculator";
 import { taxConfigForYear } from "@/lib/tax/config";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
-import { parseLongbridgePdfs } from "@/lib/parsers/longbridge";
+import { parseLongbridgePdfs, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
 import { parseTigerPdfs } from "@/lib/parsers/tiger";
+import { parseZirconPdfs } from "@/lib/parsers/zircon";
 import { ParserValidationError } from "@/lib/parsers/common";
 import type { CostBasisCorrection, CostBasisMethod, ParsedInput, TaxAnalysis } from "@/lib/tax/types";
 
-export type BrokerId = "futu" | "longbridge" | "tiger";
+export type BrokerId = "futu" | "longbridge" | "tiger" | "zircon";
 
 export interface UploadFileEntry {
   id: string;
@@ -101,6 +102,7 @@ export async function analyzeUploadedFiles(options: {
   taxYear: number;
   password?: string;
   manualCosts?: ManualCostInput[];
+  securityAliases?: ManualSecurityAliasInput[];
   costCorrections?: CostBasisCorrection[];
 }): Promise<AnalysisResult> {
   const realFiles = options.files.filter((entry) => entry.file);
@@ -122,6 +124,7 @@ export async function analyzeUploadedFiles(options: {
   const futuFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const longbridgeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const tigerFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const zirconFiles: Array<{ name: string; data: ArrayBuffer }> = [];
 
   for (const entry of realFiles) {
     const file = entry.file;
@@ -137,11 +140,16 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为长桥，但长桥解析器只接受 PDF 月结单。`, file.name);
       }
       longbridgeFiles.push({ name: file.name, data: await file.arrayBuffer() });
-    } else {
+    } else if (entry.broker === "tiger") {
       if (!lower.endsWith(".pdf")) {
         throw new ParserValidationError(`${file.name} 被标记为老虎，但老虎解析器只接受 PDF 税表或活动报表。`, file.name);
       }
       tigerFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为卓锐，但卓锐解析器只接受 PDF 月结单。`, file.name);
+      }
+      zirconFiles.push({ name: file.name, data: await file.arrayBuffer() });
     }
   }
 
@@ -154,6 +162,21 @@ export async function analyzeUploadedFiles(options: {
       throw new ParserValidationError("检测到长桥 PDF 月结单，请先填写长桥 PDF 密码（手机号后四位 + 身份证后四位）后再解析。");
     }
     const parsed = await parseLongbridgePdfs(longbridgeFiles, options.password, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
+      securityAliases: options.securityAliases ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
+  }
+  if (zirconFiles.length > 0) {
+    if (!options.password?.trim()) {
+      throw new ParserValidationError("检测到卓锐 PDF 月结单，请先填写卓锐 PDF 密码后再解析。");
+    }
+    const parsed = await parseZirconPdfs(zirconFiles, options.password, {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
     });
