@@ -1070,6 +1070,7 @@ function PnlTable({
   fx,
   tradeActivities = [],
   pendingCostFlashToken,
+  hasLongbridgeNoStockActivity = false,
 }) {
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("all");
@@ -1151,6 +1152,11 @@ function PnlTable({
                         <span>
                           已识别 {tradeActivities.length} 笔成交流水，其中买入 / 转入 {buyActivityCount} 笔、卖出 {sellActivityCount} 笔。盈亏明细只展示卖出后形成的已实现盈亏；买入流水会作为后续月份卖出时的成本材料。
                         </span>
+                      </>
+                    ) : rows.length === 0 && hasLongbridgeNoStockActivity ? (
+                      <>
+                        <b>本月没有股票买卖记录</b>
+                        <span>已识别到长桥月结单，但没有股票买卖记录；现金入金、出金或账户余额变化不会形成已实现资本利得。</span>
                       </>
                     ) : rows.length === 0 ? (
                       <>
@@ -1836,6 +1842,7 @@ function Workbench({
   tradeActivities,
   fx,
   pendingCostFlashToken,
+  hasLongbridgeNoStockActivity,
 }) {
   const [tab, setTab] = useState("pnl");
   const transferRecords = useMemo(() => transferRecordsFromActivities(tradeActivities), [tradeActivities]);
@@ -1887,6 +1894,7 @@ function Workbench({
                 fx={fx}
                 tradeActivities={tradeActivities}
                 pendingCostFlashToken={pendingCostFlashToken}
+                hasLongbridgeNoStockActivity={hasLongbridgeNoStockActivity}
               />
             ) : null}
             {tab === "div" ? <DividendsTable dividends={dividends} fx={fx} /> : null}
@@ -2896,6 +2904,10 @@ export default function App() {
     () => (currentAnalysis?.issues ?? []).filter((issue) => issue.severity !== "blocking" && !isCostGapIssue(issue)),
     [currentAnalysis],
   );
+  const hasLongbridgeNoStockActivity = useMemo(
+    () => (currentAnalysis?.issues ?? []).some((issue) => issue.id === "longbridge-no-stock-activity"),
+    [currentAnalysis],
+  );
   const costBasisRequests = useMemo(() => currentAnalysis?.costBasisRequests ?? [], [currentAnalysis]);
   const modalIssues = useMemo(
     () => [...manualIssues, ...analysisIssues].filter((issue) => !dismissedIssueIds.has(issue.id)),
@@ -3257,6 +3269,7 @@ export default function App() {
           tradeActivities={tradeActivities}
           fx={fx}
           pendingCostFlashToken={pendingCostFlashToken}
+          hasLongbridgeNoStockActivity={hasLongbridgeNoStockActivity}
         />
       ) : null}
       {page === "holdings" ? (

@@ -111,6 +111,7 @@ interface LongbridgeRawData {
   moves: PositionMoveRecord[];
   positions: PortfolioRecord[];
   issues: ReviewIssue[];
+  statementDetected: boolean;
 }
 
 export interface ManualCostInput {
@@ -219,6 +220,8 @@ function clean(value: string) {
 
 function canonicalText(value: string) {
   return value
+    .normalize("NFKC")
+    .replaceAll("⻓", "长")
     .replaceAll("⽣", "生")
     .replaceAll("⽇", "日")
     .replaceAll("⾦", "金")
@@ -228,6 +231,18 @@ function canonicalText(value: string) {
     .replaceAll("⼿", "手")
     .replaceAll("⾏", "行")
     .replaceAll("⽤", "用");
+}
+
+function isLongbridgeMonthlyStatement(text: string) {
+  const lower = text.toLowerCase();
+  return (
+    text.includes("综合账户月结单") ||
+    text.includes("长桥证券") ||
+    lower.includes("longbridge securities") ||
+    lower.includes("long bridge securities") ||
+    lower.includes("longbridge hk") ||
+    lower.includes("long bridge hk")
+  );
 }
 
 function parseNumber(value: string) {
@@ -517,6 +532,7 @@ function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeR
     moves: [],
     positions: [],
     issues: [],
+    statementDetected: false,
   };
 
   let activeTable: "none" | "portfolio" | "stock_trade" | "cash_flow" | "position_move" = "none";
@@ -530,6 +546,9 @@ function parseLongbridgeLines(sourcePdf: string, lines: TextLine[]): LongbridgeR
 
   for (const line of lines) {
     const text = canonicalText(line.text);
+    if (isLongbridgeMonthlyStatement(text)) {
+      raw.statementDetected = true;
+    }
     if (text.includes("项目") && text.includes("期初持仓") && text.includes("浮动盈亏")) {
       activeTable = "portfolio";
       continue;
@@ -1118,6 +1137,7 @@ export async function parseLongbridgePdfs(
     moves: [],
     positions: [],
     issues: [],
+    statementDetected: false,
   };
 
   for (const file of files) {
@@ -1130,6 +1150,7 @@ export async function parseLongbridgePdfs(
       raw.moves.push(...fileRaw.moves);
       raw.positions.push(...fileRaw.positions);
       raw.issues.push(...fileRaw.issues);
+      raw.statementDetected = raw.statementDetected || fileRaw.statementDetected;
     } catch (error) {
       raw.issues.push({
         id: `${file.name}-pdf-error`,
@@ -1149,7 +1170,10 @@ export async function parseLongbridgePdfs(
   parsed.issues.push(...raw.issues, ...realized.issues);
   parsed.costBasisRequests.push(...realized.costBasisRequests);
 
-  if (raw.trades.length === 0 && raw.cashFlows.length === 0 && raw.moves.length === 0 && raw.positions.length === 0 && files.length > 0) {
+  const hasParsedStatementRows = raw.trades.length > 0 || raw.cashFlows.length > 0 || raw.moves.length > 0 || raw.positions.length > 0;
+  const hasRecognizedStatement = raw.statementDetected || hasParsedStatementRows;
+
+  if (!hasParsedStatementRows && !hasRecognizedStatement && files.length > 0) {
     parsed.issues.push({
       id: "longbridge-invalid-format",
       severity: "blocking",
@@ -1160,10 +1184,12 @@ export async function parseLongbridgePdfs(
 
   if (raw.trades.length === 0 && files.length > 0) {
     parsed.issues.push({
-      id: "longbridge-no-trades",
-      severity: "warning",
-      title: "未识别长桥股票交易",
-      detail: "没有从上传的长桥PDF中识别到股票交易表。请确认文件是否为月结单且密码正确。",
+      id: hasRecognizedStatement ? "longbridge-no-stock-activity" : "longbridge-no-trades",
+      severity: hasRecognizedStatement ? "info" : "warning",
+      title: hasRecognizedStatement ? "本月没有长桥股票交易" : "未识别长桥股票交易",
+      detail: hasRecognizedStatement
+        ? "已识别为长桥综合账户月结单，但本月没有股票买卖记录。系统会按无股票交易处理，现金入金、出金或账户余额变化不会形成已实现资本利得；如本月实际发生卖出，请重新下载包含股票交易明细的月结单后再上传。"
+        : "没有从上传的长桥 PDF 中识别到股票交易表。请确认文件是否为月结单且密码正确。",
     });
   }
 
