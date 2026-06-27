@@ -59,6 +59,7 @@ interface StockTradeRecord {
   tradeAmount: number;
   cashChange: number;
   sequence: number;
+  tradeTime?: string;
   codeResolution: "explicit" | "known_alias" | "name_fallback";
 }
 
@@ -277,6 +278,7 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   "kulr tech": { code: "KULR", name: "KULR Tech", market: "美国市场", currency: "USD" },
   microsoft: { code: "MSFT", name: "Microsoft", market: "美国市场", currency: "USD" },
   "micron tech": { code: "MU", name: "Micron Tech", market: "美国市场", currency: "USD" },
+  nvidia: { code: "NVDA", name: "NVIDIA", market: "美国市场", currency: "USD" },
   英伟达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
   辉达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
   拼多多: { code: "PDD", name: "拼多多", market: "美国市场", currency: "USD" },
@@ -386,7 +388,8 @@ function isLongbridgeMonthlyStatement(text: string) {
     lower.includes("longbridge securities") ||
     lower.includes("long bridge securities") ||
     lower.includes("longbridge hk") ||
-    lower.includes("long bridge hk")
+    lower.includes("long bridge hk") ||
+    lower.includes("monthly statement/tax invoice")
   );
 }
 
@@ -497,6 +500,16 @@ function hasDateAtStart(line: TextLine) {
   return Boolean(first && DATE_RE.test(first));
 }
 
+function isBuySide(value: string) {
+  const text = canonicalText(value).toUpperCase();
+  return text.includes("买") || text === "BUY";
+}
+
+function isSellSide(value: string) {
+  const text = canonicalText(value).toUpperCase();
+  return text.includes("卖") || text === "SELL";
+}
+
 function inferTradeMarket(item: string, security: ReturnType<typeof splitSecurity>) {
   if (security.market && security.currency) {
     return { market: security.market, currency: security.currency };
@@ -548,7 +561,7 @@ function hasCompleteStockTradeFields(fields: StockTradeFields) {
     DATE_RE.test(fields.tradeDate) &&
     DATE_RE.test(fields.settleDate) &&
     /^OS\d+/.test(fields.orderId) &&
-    (fields.side.includes("买") || fields.side.includes("卖")) &&
+    (isBuySide(fields.side) || isSellSide(fields.side)) &&
     Boolean(fields.item) &&
     isNumericCell(fields.quantity) &&
     isNumericCell(fields.avgPrice) &&
@@ -599,10 +612,14 @@ function hasCompletePortfolioFields(fields: PortfolioFields) {
 
 async function extractPdfLines(fileName: string, data: ArrayBuffer, password?: string) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  const isBrowser = typeof window !== "undefined";
+  if (isBrowser) {
+    pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  }
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(data.slice(0)),
     password,
+    disableWorker: !isBrowser,
     disableFontFace: true,
     isEvalSupported: false,
   } as Parameters<typeof pdfjs.getDocument>[0]);
@@ -694,7 +711,7 @@ function parseStockTradeLine(
   if (!fields || !DATE_RE.test(fields.tradeDate) || !DATE_RE.test(fields.settleDate) || !/^OS\d+/.test(fields.orderId)) {
     return null;
   }
-  if (!fields.side.includes("买") && !fields.side.includes("卖")) return null;
+  if (!isBuySide(fields.side) && !isSellSide(fields.side)) return null;
 
   const security = splitSecurity(fields.item, documentAliases);
   if (!security.code || !fields.quantity || !fields.avgPrice || !fields.tradeAmount || !fields.cashChange) return null;
@@ -720,27 +737,89 @@ function parseStockTradeLine(
   };
 }
 
+interface CashFlowFields {
+  date: string;
+  flowType: string;
+  note: string;
+  amount: string;
+}
+
+const ENGLISH_CASH_FLOW_TYPES = [
+  "Currency Conversion (Credit)",
+  "Currency Conversion (Debit)",
+  "Reward Redemption Stock Cash Coupon",
+  "Reward Redemption Cash Coupon",
+  "Cash Withdrawal",
+  "Cash Deposit",
+  "Debit Interest",
+  "Cash Dividend",
+  "Withholding Tax/Dividend Fee",
+  "Company Action Other Fee",
+  "Company Action",
+];
+
+function isTaxInvoiceDetailLine(text: string) {
+  return /^20\d{2}\.\d{2}\.\d{2}\s+\d{5,}\b/.test(text) && (text.includes("%") || text.includes("(Exempted)"));
+}
+
+function parseInlineCashFlowFields(line: TextLine): CashFlowFields | null {
+  const amountPattern = String.raw`[+-]?\d[\d,]*(?:\.\d+)?`;
+  const text = canonicalText(line.text);
+  if (isTaxInvoiceDetailLine(text)) return null;
+  const match = text.match(new RegExp(String.raw`^(20\d{2}\.\d{2}\.\d{2})\s+(.+?)\s+(${amountPattern})$`));
+  if (!match || /\bOS\d+\b/.test(match[2])) return null;
+
+  const detail = clean(match[2]);
+  const englishType = ENGLISH_CASH_FLOW_TYPES.find((type) => detail.toLowerCase().startsWith(type.toLowerCase()));
+  if (englishType) {
+    return {
+      date: match[1],
+      flowType: englishType,
+      note: clean(detail.slice(englishType.length)),
+      amount: match[3],
+    };
+  }
+
+  const [flowType = "", ...noteParts] = detail.split(" ");
+  return {
+    date: match[1],
+    flowType,
+    note: clean(noteParts.join(" ")),
+    amount: match[3],
+  };
+}
+
+function isCurrencySummaryItem(value: string) {
+  return /^(HKD|USD|CNY|SGD)$/i.test(clean(value));
+}
+
 function parseCashFlowLine(
   sourcePdf: string,
   line: TextLine,
   currency: Currency,
 ): CashFlowRecord | null {
   if (!hasDateAtStart(line)) return null;
-  const date = lineCell(line, 0, 105);
-  const flowType = lineCell(line, 105, 260);
-  const note = lineCell(line, 260, 520);
-  const amount = lineCell(line, 520, 610);
+  const cellFields: CashFlowFields = {
+    date: lineCell(line, 0, 105),
+    flowType: lineCell(line, 105, 260),
+    note: lineCell(line, 260, 520),
+    amount: lineCell(line, 520, 610),
+  };
+  const fields =
+    DATE_RE.test(cellFields.date) && cellFields.flowType && isNumericCell(cellFields.amount)
+      ? cellFields
+      : parseInlineCashFlowFields(line);
 
-  if (!DATE_RE.test(date) || !flowType || !amount) return null;
+  if (!fields || !DATE_RE.test(fields.date) || !fields.flowType || !fields.amount) return null;
 
   return {
     sourcePdf,
     page: line.page,
     currency,
-    date,
-    flowType,
-    note,
-    amount: parseNumber(amount),
+    date: fields.date,
+    flowType: fields.flowType,
+    note: fields.note,
+    amount: parseNumber(fields.amount),
     evidence: {
       page: line.page,
       text: line.text,
@@ -816,7 +895,13 @@ function parsePortfolioLine(
   if (!fields) return null;
 
   const canonicalItem = canonicalText(fields.item);
-  if (!fields.item || canonicalItem.startsWith("汇总") || canonicalItem.startsWith("股票") || canonicalItem.startsWith("余额通")) {
+  if (
+    !fields.item ||
+    canonicalItem.startsWith("汇总") ||
+    canonicalItem.startsWith("股票") ||
+    canonicalItem.startsWith("余额通") ||
+    isCurrencySummaryItem(canonicalItem)
+  ) {
     return null;
   }
 
@@ -904,6 +989,8 @@ function parseLongbridgeLines(
   let sequence = 0;
   const fallbackSecurityNames = new Map<string, string>();
   const documentSecurityAliases = manualSecurityAliasMap(manualAliases);
+  let lastTradeForTime: StockTradeRecord | null = null;
+  let expectingTradeTime = false;
 
   for (const line of lines) {
     const text = canonicalText(line.text);
@@ -913,6 +1000,19 @@ function parseLongbridgeLines(
     const statementMonthMatch = text.match(/^(20\d{2})\.(0[1-9]|1[0-2])$/);
     if (statementMonthMatch) {
       statementMonth = `${statementMonthMatch[1]}-${statementMonthMatch[2]}`;
+    }
+    if (/^Order Time\s+Transaction Time\s+Quantity\s+Price$/i.test(text)) {
+      expectingTradeTime = true;
+      continue;
+    }
+    if (expectingTradeTime) {
+      const tradeTimeMatch = text.match(/^\d{2}:\d{2}:\d{2}\s+\S+\s+(\d{2}:\d{2}:\d{2})\s+\S+/);
+      if (tradeTimeMatch && lastTradeForTime) {
+        lastTradeForTime.tradeTime = tradeTimeMatch[1];
+        expectingTradeTime = false;
+        continue;
+      }
+      expectingTradeTime = false;
     }
     if (text.includes("项目") && text.includes("期初持仓") && text.includes("浮动盈亏")) {
       activeTable = "portfolio";
@@ -960,6 +1060,7 @@ function parseLongbridgeLines(
       if (trade) {
         activeTable = "stock_trade";
         raw.trades.push(trade);
+        lastTradeForTime = trade;
         addDocumentSecurityAlias(documentSecurityAliases, {
           code: trade.code,
           name: trade.name,
@@ -970,6 +1071,12 @@ function parseLongbridgeLines(
           fallbackSecurityNames.set(trade.code, trade.name);
         }
         sequence += 1;
+        continue;
+      }
+      const cashFlow = parseCashFlowLine(sourcePdf, line, cashCurrency);
+      if (cashFlow) {
+        activeTable = "cash_flow";
+        raw.cashFlows.push(cashFlow);
         continue;
       }
       if (activeTable === "stock_trade") continue;
@@ -1032,7 +1139,10 @@ function usSymbolFromNote(note: string) {
 }
 
 function isUsDividendCashFlow(cashFlow: CashFlowRecord) {
-  return canonicalText(cashFlow.flowType).includes("分红") && Boolean(dividendSymbolFromNote(cashFlow.note)) && cashFlow.amount > 0;
+  const flowType = canonicalText(cashFlow.flowType).toLowerCase();
+  const note = canonicalText(cashFlow.note).toLowerCase();
+  const isDividend = flowType.includes("分红") || flowType.includes("cash dividend") || note.includes("cash dividend");
+  return isDividend && Boolean(dividendSymbolFromNote(cashFlow.note)) && cashFlow.amount > 0;
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -1136,7 +1246,13 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
     const flowType = canonicalText(cashFlow.flowType);
     const note = canonicalText(cashFlow.note);
     const dividendSymbol = dividendSymbolFromNote(cashFlow.note) ?? singleSymbolForDate(cashFlow.date);
-    if (flowType.includes("分红") && dividendSymbol && cashFlow.amount > 0) {
+    const lowerFlowType = flowType.toLowerCase();
+    const lowerNote = note.toLowerCase();
+    if (
+      (flowType.includes("分红") || lowerFlowType.includes("cash dividend") || lowerNote.includes("cash dividend")) &&
+      dividendSymbol &&
+      cashFlow.amount > 0
+    ) {
       const symbol = dividendSymbol;
       const key = `${cashFlow.date}-${symbol}`;
       dividends.push({
@@ -1177,7 +1293,11 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
       continue;
     }
 
-    if (note.includes("Withholding Tax/Dividend Fee") || (flowType.includes("公司行动其他费用") && note.includes("Cash Dividend"))) {
+    if (
+      note.includes("Withholding Tax/Dividend Fee") ||
+      lowerFlowType.includes("withholding tax/dividend fee") ||
+      (flowType.includes("公司行动其他费用") && note.includes("Cash Dividend"))
+    ) {
       const taxMatch = cashFlow.note.match(/([A-Z]{1,5})\.US\s+Cash Dividend/i);
       const symbol = taxMatch?.[1].toUpperCase() ?? singleSymbolForDate(cashFlow.date);
       if (!symbol) continue;
@@ -1340,15 +1460,15 @@ function buildRealizedTrades(
   }
 
   for (const trade of raw.trades) {
-    const isBuy = trade.side.includes("买");
-    const isSell = trade.side.includes("卖");
+    const isBuy = isBuySide(trade.side);
+    const isSell = isSellSide(trade.side);
     if (!isBuy && !isSell) continue;
     events.push({
       kind: isBuy ? "buy" : "sell",
       date: normalizeDate(trade.tradeDate),
       rank: 2,
       sequence: trade.sequence + sequence,
-      time: ORDER_TIME_OVERRIDE[trade.orderId] ?? "99:99:99",
+      time: trade.tradeTime ?? ORDER_TIME_OVERRIDE[trade.orderId] ?? "99:99:99",
       market: trade.market,
       currency: trade.currency,
       code: trade.code,
@@ -1441,6 +1561,8 @@ function buildRealizedTrades(
         id: `longbridge-${event.date}-${event.sequence}-${event.code}-${event.note}`,
         broker: "长桥",
         sellDate: event.date,
+        time: event.time,
+        sequence: event.sequence,
         market: event.market,
         currency: event.currency,
         symbol: displayCode(event.code),
