@@ -343,6 +343,19 @@ function isTransferActivity(activity) {
   return ["acquire", "transfer_in", "transfer_out"].includes(activity.side);
 }
 
+function activitySideLabel(activity) {
+  if (activity.side === "sell") return "卖出";
+  if (activity.side === "buy") return "买入";
+  if (activity.side === "short_open") return "卖出开仓";
+  if (activity.side === "short_close") return "买入平仓";
+  if (activity.side === "transfer_out") return "转出";
+  return "转入";
+}
+
+function isBuyLikeActivity(activity) {
+  return ["buy", "acquire", "transfer_in", "short_close"].includes(activity.side);
+}
+
 function transferSideLabel(activity) {
   if (activity.side === "transfer_out") return "转出";
   if (activity.side === "transfer_in") return "转入";
@@ -1341,8 +1354,8 @@ function PnlTable({
     return okQuery && okMarket;
   });
   const symbolCount = uniqueSymbolCount(rows);
-  const buyActivityCount = tradeActivities.filter((activity) => activity.side === "buy" || activity.side === "acquire" || activity.side === "transfer_in").length;
-  const sellActivityCount = tradeActivities.filter((activity) => activity.side === "sell").length;
+  const buyActivityCount = tradeActivities.filter(isBuyLikeActivity).length;
+  const sellActivityCount = tradeActivities.filter((activity) => activity.side === "sell" || activity.side === "short_open").length;
 
   useEffect(() => {
     if (!openRow) {
@@ -1406,7 +1419,7 @@ function PnlTable({
                       <>
                         <b>当前材料没有形成已实现盈亏</b>
                         <span>
-                          已识别 {tradeActivities.length} 笔成交流水，其中买入 / 转入 {buyActivityCount} 笔、卖出 {sellActivityCount} 笔。盈亏明细只展示卖出后形成的已实现盈亏；买入流水会作为后续月份卖出时的成本材料。
+                          已识别 {tradeActivities.length} 笔成交流水，其中买入 / 转入 / 买入平仓 {buyActivityCount} 笔、卖出 / 卖出开仓 {sellActivityCount} 笔。盈亏明细只展示卖出或做空平仓后形成的已实现盈亏。
                         </span>
                       </>
                     ) : rows.length === 0 && hasLongbridgeNoStockActivity ? (
@@ -2314,7 +2327,8 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
         code: activity.symbol,
         name: activity.securityName,
         currency: activity.currency,
-        side: activity.side === "sell" ? "卖出" : activity.side === "buy" ? "买入" : activity.side === "transfer_out" ? "转出" : "转入",
+        side: activitySideLabel(activity),
+        rawSide: activity.side,
         qty: activity.quantity,
         price: activity.unitPrice ?? (activity.quantity ? Math.abs(activity.amount / activity.quantity) : 0),
         amount: activity.grossAmount ?? Math.abs(activity.amount),
@@ -2505,7 +2519,7 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
                   <td className="code-cell">{flow.code}</td>
                   <td className="stock-nm">{flow.name}</td>
                   <td className="c">
-                    <span className={`side ${flow.side === "买入" ? "bi" : "se"}`}>{flow.side}</span>
+                    <span className={`side ${isBuyLikeActivity({ side: flow.rawSide }) ? "bi" : "se"}`}>{flow.side}</span>
                   </td>
                   <td className="c">
                     <span className="ccy">{flow.currency}</span>

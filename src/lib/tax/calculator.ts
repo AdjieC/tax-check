@@ -123,6 +123,9 @@ interface ReplayState {
   quantity: number;
   costBasis: number;
   lots: Array<{ quantity: number; costBasis: number }>;
+  shortQuantity: number;
+  shortProceeds: number;
+  shortLots: Array<{ quantity: number; proceeds: number }>;
 }
 
 function tradeKey(trade: Pick<RealizedTrade, "broker" | "currency" | "symbol">) {
@@ -190,6 +193,8 @@ function sortActivities(activities: TradeActivity[]) {
     acquire: 1,
     transfer_in: 1,
     buy: 2,
+    short_open: 2,
+    short_close: 2,
     sell: 2,
     transfer_out: 3,
   };
@@ -268,6 +273,12 @@ function addCost(state: ReplayState, quantity: number, costBasis: number) {
   state.lots.push({ quantity, costBasis });
 }
 
+function addShortProceeds(state: ReplayState, quantity: number, proceeds: number) {
+  state.shortQuantity += quantity;
+  state.shortProceeds += proceeds;
+  state.shortLots.push({ quantity, proceeds });
+}
+
 function consumeAcb(state: ReplayState, quantity: number) {
   const costBasis = quantity * (state.quantity === 0 ? 0 : state.costBasis / state.quantity);
   state.quantity -= quantity;
@@ -302,6 +313,41 @@ function consumeFifo(state: ReplayState, quantity: number) {
   return costBasis;
 }
 
+function consumeShortAcb(state: ReplayState, quantity: number) {
+  const proceeds = quantity * (state.shortQuantity === 0 ? 0 : state.shortProceeds / state.shortQuantity);
+  state.shortQuantity -= quantity;
+  state.shortProceeds -= proceeds;
+  if (Math.abs(state.shortQuantity) < 1e-8) {
+    state.shortQuantity = 0;
+    state.shortProceeds = 0;
+    state.shortLots = [];
+  }
+  return proceeds;
+}
+
+function consumeShortFifo(state: ReplayState, quantity: number) {
+  let remaining = quantity;
+  let proceeds = 0;
+  while (remaining > 1e-8 && state.shortLots.length > 0) {
+    const lot = state.shortLots[0];
+    const used = Math.min(remaining, lot.quantity);
+    const lotProceeds = lot.quantity === 0 ? 0 : (lot.proceeds * used) / lot.quantity;
+    proceeds += lotProceeds;
+    lot.quantity -= used;
+    lot.proceeds -= lotProceeds;
+    remaining -= used;
+    if (lot.quantity <= 1e-8) state.shortLots.shift();
+  }
+  state.shortQuantity -= quantity;
+  state.shortProceeds -= proceeds;
+  if (Math.abs(state.shortQuantity) < 1e-8) {
+    state.shortQuantity = 0;
+    state.shortProceeds = 0;
+    state.shortLots = [];
+  }
+  return proceeds;
+}
+
 function quantityMatches(left: number, right: number) {
   return Math.abs(left - right) <= Math.max(1e-7, Math.abs(right) * 1e-7);
 }
@@ -331,6 +377,9 @@ function replayScenario(
         quantity: 0,
         costBasis: 0,
         lots: [],
+        shortQuantity: 0,
+        shortProceeds: 0,
+        shortLots: [],
       } satisfies ReplayState);
     state.market = activity.market || state.market;
     state.currency = activity.currency || state.currency;
@@ -338,6 +387,42 @@ function replayScenario(
 
     if (activity.side === "buy" || activity.side === "acquire" || activity.side === "transfer_in") {
       addCost(state, activity.quantity, activity.amount);
+    } else if (activity.side === "short_open") {
+      addShortProceeds(state, activity.quantity, activity.amount);
+    } else if (activity.side === "short_close") {
+      if (state.shortQuantity + 1e-7 < activity.quantity) {
+        if (inWindow(activity.date, window) && !excludedKeys.has(activityKey(activity))) {
+          missingCostIssueCount += 1;
+        }
+        state.shortQuantity = 0;
+        state.shortProceeds = 0;
+        state.shortLots = [];
+        states.set(activityKey(activity), state);
+        continue;
+      }
+
+      const proceeds =
+        costBasisMethod === "fifo" ? consumeShortFifo(state, activity.quantity) : consumeShortAcb(state, activity.quantity);
+      const costBasis = activity.amount;
+      if (inWindow(activity.date, window) && !excludedKeys.has(activityKey(activity))) {
+        trades.push({
+          id: `${activity.id}-${window.mode}-${costBasisMethod}`,
+          broker: activity.broker,
+          sellDate: activity.date,
+          time: activity.time,
+          sequence: activity.sequence,
+          market: activity.market,
+          currency: activity.currency,
+          symbol: activity.symbol,
+          securityName: activity.securityName,
+          quantity: activity.quantity,
+          proceeds,
+          costBasis,
+          gainLoss: proceeds - costBasis,
+          source: activity.source,
+          note: `${activity.note ? `${activity.note}；` : ""}做空平仓，按开仓卖出收入减去买入平仓成本计算。`,
+        });
+      }
     } else if (activity.side === "sell") {
       if (state.quantity + 1e-7 < activity.quantity) {
         if (

@@ -39,7 +39,14 @@ export interface RealizedTrade {
   useBrokerReportedGainLoss?: boolean;
 }
 
-export type TradeActivitySide = "buy" | "sell" | "acquire" | "transfer_in" | "transfer_out";
+export type TradeActivitySide =
+  | "buy"
+  | "sell"
+  | "short_open"
+  | "short_close"
+  | "acquire"
+  | "transfer_in"
+  | "transfer_out";
 
 export interface TradeActivity {
   id: string;

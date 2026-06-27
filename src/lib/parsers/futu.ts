@@ -29,6 +29,8 @@ interface PositionState {
   name: string;
   quantity: number;
   costBasis: number;
+  shortQuantity: number;
+  shortProceeds: number;
 }
 
 export interface ManualCostInput {
@@ -66,6 +68,8 @@ interface MissingCostSale {
   note: string;
 }
 
+type FutuTradeKind = "buy" | "sell" | "short_open" | "short_close";
+
 type FutuEvent =
   | {
       kind: "acquire";
@@ -82,7 +86,7 @@ type FutuEvent =
       note: string;
     }
   | {
-      kind: "buy" | "sell";
+      kind: FutuTradeKind;
       date: string;
       time: string;
       sequence: number;
@@ -232,14 +236,13 @@ function isSupportedTradeCategory(value: unknown) {
   return !category || category === "证券" || category === "基金";
 }
 
-function isFutuBuySide(value: unknown) {
+function classifyFutuTradeSide(value: unknown): FutuTradeKind | null {
   const side = String(value ?? "");
-  return side.includes("买入") || side.includes("申购");
-}
-
-function isFutuSellSide(value: unknown) {
-  const side = String(value ?? "");
-  return side.includes("卖出") || side.includes("赎回");
+  if (side.includes("卖出开仓")) return "short_open";
+  if (side.includes("买入平仓")) return "short_close";
+  if (side.includes("买入") || side.includes("申购")) return "buy";
+  if (side.includes("卖出") || side.includes("赎回")) return "sell";
+  return null;
 }
 
 function positionKey(currency: Currency, symbol: string) {
@@ -250,12 +253,16 @@ function stateAvgCost(state: PositionState) {
   return Math.abs(state.quantity) < 1e-9 ? 0 : state.costBasis / state.quantity;
 }
 
+function stateAvgShortProceeds(state: PositionState) {
+  return Math.abs(state.shortQuantity) < 1e-9 ? 0 : state.shortProceeds / state.shortQuantity;
+}
+
 function tradeId(event: FutuEvent, costBasis: number) {
   return `futu-${event.date}-${event.currency}-${event.symbol}-${event.quantity}-${Math.round(costBasis * 100)}`;
 }
 
 function activityAmount(event: FutuEvent) {
-  if ("cash" in event) return event.kind === "buy" ? -event.cash : event.cash;
+  if ("cash" in event) return event.kind === "buy" || event.kind === "short_close" ? -event.cash : event.cash;
   return event.cost;
 }
 
@@ -372,9 +379,8 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
       const row = rowObject(tradeHeaders, values);
       if (!isSupportedTradeCategory(row["品类"])) continue;
       const side = String(row["方向"] ?? "");
-      const isBuy = isFutuBuySide(side);
-      const isSell = isFutuSellSide(side);
-      if (!isBuy && !isSell) continue;
+      const kind = classifyFutuTradeSide(side);
+      if (!kind) continue;
       const symbol = normalizeSymbol(row["代码名称"]);
       const quantity = Math.abs(asNumber(row["数量/面值"]));
       const unitPrice = Math.abs(asNumber(row["价格"]));
@@ -386,7 +392,7 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
       const fee = explicitFee || impliedFee;
       if (!symbol || quantity <= 0) continue;
       events.push({
-        kind: isBuy ? "buy" : "sell",
+        kind,
         date: normalizeFutuDate(row["成交时间"]),
         time: normalizeFutuTime(row["成交时间"]),
         sequence,
@@ -461,6 +467,8 @@ function buildRealizedTrades(
         name: event.securityName,
         quantity: 0,
         costBasis: 0,
+        shortQuantity: 0,
+        shortProceeds: 0,
       } satisfies PositionState);
     state.market = event.market || state.market;
     state.currency = event.currency || state.currency;
@@ -472,6 +480,54 @@ function buildRealizedTrades(
     } else if (event.kind === "buy") {
       state.quantity += event.quantity;
       state.costBasis += -event.cash;
+    } else if (event.kind === "short_open") {
+      state.shortQuantity += event.quantity;
+      state.shortProceeds += activityAmount(event);
+    } else if (event.kind === "short_close") {
+      if (state.shortQuantity + 1e-7 < event.quantity) {
+        if (event.date.startsWith(String(targetYear))) {
+          issues.push({
+            id: `futu-short-open-${targetYear}-${event.currency}-${event.symbol}-${event.date}-${event.sequence}`,
+            severity: "warning",
+            title: `${event.symbol} 做空开仓记录缺失`,
+            detail: `${event.date} 买入平仓 ${event.quantity} 股，但上传文件中最多只追踪到 ${state.shortQuantity} 股卖出开仓；这笔做空平仓未计入资本利得。请补充包含卖出开仓的富途年度报表。`,
+            source: event.source,
+          });
+        }
+        state.shortQuantity = 0;
+        state.shortProceeds = 0;
+        states.set(key, state);
+        continue;
+      }
+
+      const proceeds = event.quantity * stateAvgShortProceeds(state);
+      const costBasis = activityAmount(event);
+      if (event.date.startsWith(String(targetYear))) {
+        trades.push({
+          id: tradeId(event, costBasis),
+          broker: "富途",
+          sellDate: event.date,
+          time: event.time,
+          sequence: event.sequence,
+          market: event.market,
+          currency: event.currency,
+          symbol: event.symbol,
+          securityName: event.securityName,
+          quantity: event.quantity,
+          proceeds,
+          costBasis,
+          gainLoss: proceeds - costBasis,
+          source: event.source,
+          note: `${event.note}；做空平仓，按开仓卖出收入减去买入平仓成本计算。`,
+        });
+      }
+
+      state.shortQuantity -= event.quantity;
+      state.shortProceeds -= proceeds;
+      if (Math.abs(state.shortQuantity) < 1e-8) {
+        state.shortQuantity = 0;
+        state.shortProceeds = 0;
+      }
     } else {
       if (state.quantity + 1e-7 < event.quantity) {
         if (event.date.startsWith(String(targetYear))) {
@@ -716,9 +772,11 @@ function inferOpenPositionsFromEvents(events: FutuEvent[], targetYear: number, e
     if (event.kind === "sell") {
       state.quantity = Math.max(0, state.quantity - event.quantity);
       state.lastPrice = event.unitPrice || state.lastPrice;
-    } else {
+    } else if (event.kind === "buy" || event.kind === "acquire") {
       state.quantity += event.quantity;
       if ("unitPrice" in event) state.lastPrice = event.unitPrice || state.lastPrice;
+    } else if ("unitPrice" in event) {
+      state.lastPrice = event.unitPrice || state.lastPrice;
     }
 
     if (Math.abs(state.quantity) < 1e-8) state.quantity = 0;

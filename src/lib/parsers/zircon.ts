@@ -642,6 +642,8 @@ function sortActivities(activities: TradeActivity[]) {
     acquire: 1,
     transfer_in: 1,
     buy: 2,
+    short_open: 2,
+    short_close: 2,
     sell: 2,
     transfer_out: 3,
   };
