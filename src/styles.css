@@ -754,9 +754,11 @@ button {
   display: block;
   font-size: 12.5px;
   font-weight: 500;
-  white-space: nowrap;
+  line-height: 1.35;
+  white-space: normal;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .file .meta span {
@@ -1462,9 +1464,9 @@ tr.open {
 
 .position-detail-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  max-width: 820px;
+  max-width: 940px;
 }
 
 .position-detail-grid div {
@@ -1486,7 +1488,12 @@ tr.open {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
+  word-break: break-word;
   font-size: 12.5px;
+}
+
+.position-detail-grid .position-source-card {
+  grid-column: span 2;
 }
 
 .inline-cost {
@@ -3181,6 +3188,14 @@ h2.sh .idx {
 
   .cost-basis-card {
     grid-template-columns: 1fr;
+  }
+
+  .position-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .position-detail-grid .position-source-card {
+    grid-column: auto;
   }
 
   .intro-actions,

@@ -284,6 +284,8 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   拼多多: { code: "PDD", name: "拼多多", market: "美国市场", currency: "USD" },
   台积电: { code: "TSM", name: "台积电", market: "美国市场", currency: "USD" },
   阿里巴巴: { code: "BABA", name: "阿里巴巴", market: "美国市场", currency: "USD" },
+  "阿里巴巴 w": { code: "09988", name: "阿里巴巴-W", market: "香港市场", currency: "HKD" },
+  "阿里巴巴 sw": { code: "09988", name: "阿里巴巴-SW", market: "香港市场", currency: "HKD" },
   联合健康: { code: "UNH", name: "联合健康", market: "美国市场", currency: "USD" },
   苹果: { code: "AAPL", name: "Apple", market: "美国市场", currency: "USD" },
   微软: { code: "MSFT", name: "Microsoft", market: "美国市场", currency: "USD" },
@@ -432,6 +434,10 @@ function isSecurityCodeCandidate(value: string) {
   return /^\d{3,6}$/.test(text) || /^[A-Z]{1,6}$/.test(text) || /^HK\d{6,}$/i.test(text);
 }
 
+function hasHongKongNameSuffix(value: string) {
+  return /\p{Script=Han}/u.test(value) && /(?:^|\s)(?:SW|SS|W|B|S|R|U|P)$/i.test(securityAliasKey(value));
+}
+
 function fallbackSecurityCode(item: string) {
   const normalized = securityAliasKey(item);
   const ascii = normalized.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -515,6 +521,9 @@ function inferTradeMarket(item: string, security: ReturnType<typeof splitSecurit
     return { market: security.market, currency: security.currency };
   }
   if (/^\d{3,6}$/.test(security.code) || /^HK\d{6,}$/i.test(security.code)) {
+    return { market: "香港市场", currency: "HKD" as const };
+  }
+  if (hasHongKongNameSuffix(item)) {
     return { market: "香港市场", currency: "HKD" as const };
   }
   if (/[A-Za-z]/.test(item) || /^[A-Z]{1,6}$/.test(security.code)) {

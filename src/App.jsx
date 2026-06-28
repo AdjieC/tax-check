@@ -1331,7 +1331,7 @@ function Sidebar({
                   <FileText />
                 </span>
                 <span className="meta">
-                  <b>{file.name}</b>
+                  <b title={file.name}>{file.name}</b>
                   <span className="file-summary">
                     <span>{brokerLabel(file.broker)} · {file.type} · {typeof file.rows === "number" ? `${file.rows} 行` : file.rows}</span>
                     <span className={`broker-confidence ${file.brokerConfidence ?? "low"}`} title={file.brokerReason}>
@@ -1757,7 +1757,7 @@ function PnlDetailRow({
                   {row.pnlOriginal === null ? "N/A" : floatingPnlLabel(row.pnlOriginal)}
                 </b>
               </div>
-              <div>
+              <div className="position-source-card">
                 <span>材料来源</span>
                 <b>{position.source}</b>
               </div>
