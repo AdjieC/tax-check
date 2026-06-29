@@ -112,6 +112,7 @@ interface MissingCostAggregate {
   symbol: string;
   securityName: string;
   quantity: number;
+  trackedQuantity: number;
   proceeds: number;
   source: string;
   sequence?: number;
@@ -709,6 +710,7 @@ function buildMissingCostRequests(baseActivities: TradeActivity[], targetYear?: 
             symbol: activity.symbol,
             securityName: activity.securityName,
             quantity: activity.quantity,
+            trackedQuantity: quantity,
             proceeds: activity.amount,
             source: activity.source,
             sequence: activity.sequence,
@@ -775,6 +777,7 @@ function buildTradeActivities(
         symbol: item.symbol,
         securityName: item.securityName,
         quantity: item.quantity,
+        trackedQuantity: item.trackedQuantity,
         proceeds: item.proceeds,
         source: item.source,
         note: "手动补录这笔成本后计入资本利得",

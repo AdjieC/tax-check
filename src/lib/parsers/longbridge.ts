@@ -1,3 +1,4 @@
+import * as XLSX from "xlsx";
 import { emptyParsedInput } from "@/lib/tax/calculator";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type {
@@ -140,6 +141,12 @@ interface LongbridgeRawData {
   statementDetected: boolean;
 }
 
+interface LongbridgeWorkbookData {
+  activities: TradeActivity[];
+  issues: ReviewIssue[];
+  statementDetected: boolean;
+}
+
 export interface ManualCostInput {
   id: string;
   costBasis: number;
@@ -277,6 +284,10 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   "archer aviation": { code: "ACHR", name: "Archer Aviation", market: "美国市场", currency: "USD" },
   "blade air mobility": { code: "BLDE", name: "Blade Air Mobility", market: "美国市场", currency: "USD" },
   celsius: { code: "CELH", name: "Celsius", market: "美国市场", currency: "USD" },
+  circle: { code: "CRCL", name: "Circle Internet Group", market: "美国市场", currency: "USD" },
+  "circle internet": { code: "CRCL", name: "Circle Internet Group", market: "美国市场", currency: "USD" },
+  "circle internet group": { code: "CRCL", name: "Circle Internet Group", market: "美国市场", currency: "USD" },
+  "circle internet group inc": { code: "CRCL", name: "Circle Internet Group", market: "美国市场", currency: "USD" },
   cleanspark: { code: "CLSK", name: "CleanSpark", market: "美国市场", currency: "USD" },
   "direxion daily msft": { code: "MSFU", name: "Direxion Daily MSFT Bull 2X Shares", market: "美国市场", currency: "USD" },
   "direxion daily msft bull 2x shares": {
@@ -309,6 +320,11 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   "tencent holdings": { code: "00700", name: "腾讯控股", market: "香港市场", currency: "HKD" },
   xiaomi: { code: "01810", name: "小米集团-W", market: "香港市场", currency: "HKD" },
   "xiaomi group": { code: "01810", name: "小米集团-W", market: "香港市场", currency: "HKD" },
+  meituan: { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  "meituan w": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  "meituan dianping": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  "03690": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  "3690": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
   英伟达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
   辉达: { code: "NVDA", name: "英伟达", market: "美国市场", currency: "USD" },
   中海物业: { code: "02669", name: "中海物业", market: "香港市场", currency: "HKD" },
@@ -316,6 +332,9 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   小米: { code: "01810", name: "小米集团-W", market: "香港市场", currency: "HKD" },
   小米集团: { code: "01810", name: "小米集团-W", market: "香港市场", currency: "HKD" },
   "小米集团 w": { code: "01810", name: "小米集团-W", market: "香港市场", currency: "HKD" },
+  美团: { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  "美团 w": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  美团点评: { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
   爱康医疗: { code: "01789", name: "爱康医疗", market: "香港市场", currency: "HKD" },
   爱康医疗控股: { code: "01789", name: "爱康医疗", market: "香港市场", currency: "HKD" },
   洛克希德马丁: { code: "LMT", name: "洛克希德马丁", market: "美国市场", currency: "USD" },
@@ -347,6 +366,7 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   百度: { code: "BIDU", name: "百度", market: "美国市场", currency: "USD" },
   京东: { code: "JD", name: "京东", market: "美国市场", currency: "USD" },
   网易: { code: "NTES", name: "网易", market: "美国市场", currency: "USD" },
+  bili: { code: "BILI", name: "哔哩哔哩", market: "美国市场", currency: "USD" },
   哔哩哔哩: { code: "BILI", name: "哔哩哔哩", market: "美国市场", currency: "USD" },
   蔚来: { code: "NIO", name: "蔚来", market: "美国市场", currency: "USD" },
   小鹏: { code: "XPEV", name: "小鹏", market: "美国市场", currency: "USD" },
@@ -480,6 +500,293 @@ function mapCurrency(value: string): Currency {
   return "HKD";
 }
 
+const STOCK_LEDGER_REQUIRED_HEADERS = ["编号", "业务时间", "账户类型", "业务分类", "股票代码", "账户流向", "数量", "总数量"];
+
+function workbookSourceId(fileName: string, rowNumber: number) {
+  return `${fileName}#row-${rowNumber}`;
+}
+
+function worksheetRows(workbook: XLSX.WorkBook, sheetName: string) {
+  const sheet = workbook.Sheets[sheetName];
+  return XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "", raw: false, blankrows: false });
+}
+
+function rowObjects(workbook: XLSX.WorkBook, sheetName: string) {
+  const sheet = workbook.Sheets[sheetName];
+  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false, blankrows: false });
+}
+
+function findStockLedgerSheetName(workbook: XLSX.WorkBook) {
+  for (const sheetName of workbook.SheetNames) {
+    const rows = worksheetRows(workbook, sheetName);
+    const headers = new Set((rows[0] ?? []).map((header) => clean(canonicalText(String(header ?? "")))));
+    const hasRequiredHeaders = STOCK_LEDGER_REQUIRED_HEADERS.every((header) => headers.has(header));
+    if (!hasRequiredHeaders) continue;
+
+    const preview = rows
+      .slice(1, 20)
+      .flatMap((row) => row.map((cell) => canonicalText(String(cell ?? ""))))
+      .join(" ");
+    if (/\[(?:LSTB|LSTS|LIPO|LPRE|SSTB|SSTS|LSTCAM|LSTIN)/.test(preview) || /(?:ST|ETF)\/(?:US|HK)\//.test(preview)) {
+      return sheetName;
+    }
+  }
+  return null;
+}
+
+function padDatePart(value: string | number) {
+  return String(value).padStart(2, "0");
+}
+
+function normalizeClockTime(value: string) {
+  const [hour = "0", minute = "0", second = "0"] = value.split(":");
+  return `${padDatePart(hour)}:${padDatePart(minute)}:${padDatePart(second)}`;
+}
+
+function transactionTimeFromDetailLine(text: string) {
+  const times = Array.from(text.matchAll(/\b\d{1,2}:\d{2}:\d{2}\b/g)).map((match) => normalizeClockTime(match[0]));
+  return times.length >= 2 ? times[1] : null;
+}
+
+function assignTradeTimeFromDetailLine(trade: StockTradeRecord | null, text: string) {
+  if (!trade) return false;
+  const transactionTime = transactionTimeFromDetailLine(text);
+  if (!transactionTime) return false;
+  trade.tradeTime = trade.tradeTime && trade.tradeTime < transactionTime ? trade.tradeTime : transactionTime;
+  return true;
+}
+
+function normalizeWorkbookDateTime(value: unknown) {
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return {
+        date: `${parsed.y}-${padDatePart(parsed.m)}-${padDatePart(parsed.d)}`,
+        time: `${padDatePart(parsed.H)}:${padDatePart(parsed.M)}:${padDatePart(Math.floor(parsed.S))}`,
+      };
+    }
+  }
+
+  const text = clean(String(value ?? ""));
+  const match = text.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!match) return { date: "", time: "99:99:99" };
+
+  return {
+    date: `${match[1]}-${padDatePart(match[2])}-${padDatePart(match[3])}`,
+    time: `${padDatePart(match[4] ?? "99")}:${padDatePart(match[5] ?? "99")}:${padDatePart(match[6] ?? "99")}`,
+  };
+}
+
+function workbookMarket(value: string) {
+  const text = value.toUpperCase();
+  if (text === "US") return { market: "美国市场", currency: "USD" as const };
+  if (text === "HK") return { market: "香港市场", currency: "HKD" as const };
+  if (text === "CN" || text === "SH" || text === "SZ") return { market: "中国市场", currency: "CNY" as const };
+  return { market: "未知市场", currency: "HKD" as const };
+}
+
+function parseWorkbookInstrument(value: unknown) {
+  const text = clean(canonicalText(String(value ?? ""))).toUpperCase();
+  const match = text.match(/^(?:ST|ETF|FUND)\/([A-Z]{2})\/([A-Z0-9. -]+)$/);
+  if (!match) return null;
+  const market = workbookMarket(match[1]);
+  const code = normalizeCode(match[2]);
+  if (!code) return null;
+  const alias = KNOWN_SECURITY_ALIASES[securityAliasKey(code)];
+  return {
+    code,
+    name: alias?.name ?? displayCode(code),
+    market: alias?.market ?? market.market,
+    currency: alias?.currency ?? market.currency,
+  };
+}
+
+function stockLedgerCategoryCode(value: unknown) {
+  return canonicalText(String(value ?? "")).match(/^\[([^\]]+)\]/)?.[1].toUpperCase() ?? "";
+}
+
+function stockLedgerCategoryText(value: unknown) {
+  return clean(canonicalText(String(value ?? "")).replace(/^\[[^\]]+\]\s*/, ""));
+}
+
+function stockLedgerSide(value: unknown): TradeActivity["side"] | null {
+  const code = stockLedgerCategoryCode(value);
+  const text = stockLedgerCategoryText(value);
+
+  if (code === "LSTBD" || text.includes("股票买入成交")) return "buy";
+  if (code === "LSTSD" || code === "LPRESTSD" || text.includes("暗盘卖出成交") || text.includes("股票卖出成交")) {
+    return "sell";
+  }
+  if (code === "SSTSD" || text.includes("股票卖空成交")) return "short_open";
+  if (code === "SSTBD" || text.includes("股票买入平仓")) return "short_close";
+  if (code === "LIPOACR" || text.includes("中签新股入账")) return "acquire";
+  if (code === "LSTINTR" || code === "LSTIN" || text.includes("证券转入") || text.includes("股票进账")) return "transfer_in";
+  if (text.includes("证券转出") || text.includes("股票出账")) return "transfer_out";
+  return null;
+}
+
+function isStockLedgerSettlementRow(value: unknown) {
+  const code = stockLedgerCategoryCode(value);
+  const text = stockLedgerCategoryText(value);
+  return code === "LSTBSET" || code === "LSTSSET" || code === "LPRESCF" || text.includes("结算") || text.includes("结转");
+}
+
+function isStockLedgerCompanyActionRow(value: unknown) {
+  const code = stockLedgerCategoryCode(value);
+  const text = stockLedgerCategoryText(value);
+  return code === "LSTCAMDR" || code === "LSTCAMCR" || text.includes("公司行动股票");
+}
+
+function stockLedgerActivityNote(row: Record<string, unknown>) {
+  const category = stockLedgerCategoryText(row["业务分类"]);
+  const remark = clean(String(row["备注"] ?? ""));
+  return `${category || "股票账户流水"}；长桥股票账户明细无成交金额，已排除税务成本重放${remark ? `；${remark}` : ""}`;
+}
+
+function parseStockLedgerActivity(
+  fileName: string,
+  row: Record<string, unknown>,
+  rowNumber: number,
+  sequence: number,
+): TradeActivity | null {
+  if (isStockLedgerSettlementRow(row["业务分类"]) || isStockLedgerCompanyActionRow(row["业务分类"])) return null;
+  const side = stockLedgerSide(row["业务分类"]);
+  if (!side) return null;
+  const instrument = parseWorkbookInstrument(row["股票代码"]);
+  if (!instrument) return null;
+  const quantity = Math.abs(parseNumber(String(row["数量"] ?? "")));
+  const { date, time } = normalizeWorkbookDateTime(row["业务时间"]);
+  if (!date || quantity <= 0) return null;
+
+  return {
+    id: `longbridge-stock-ledger-${date}-${time}-${sequence}-${instrument.currency}-${displayCode(instrument.code)}-${side}`,
+    broker: "长桥",
+    date,
+    time,
+    sequence,
+    market: instrument.market,
+    currency: instrument.currency,
+    symbol: displayCode(instrument.code),
+    securityName: instrument.name,
+    side,
+    quantity,
+    amount: 0,
+    source: workbookSourceId(fileName, rowNumber),
+    note: stockLedgerActivityNote(row),
+    excludedFromTaxReplay: true,
+  };
+}
+
+function stockLedgerSplitGroupKey(row: Record<string, unknown>) {
+  const { date, time } = normalizeWorkbookDateTime(row["业务时间"]);
+  return [date, time, String(row["股票代码"] ?? ""), canonicalText(String(row["备注"] ?? ""))].join("::");
+}
+
+function parseStockLedgerSplitActivities(
+  fileName: string,
+  rows: Array<{ row: Record<string, unknown>; rowNumber: number }>,
+  startSequence: number,
+) {
+  const groups = new Map<string, Array<{ row: Record<string, unknown>; rowNumber: number }>>();
+  for (const item of rows) {
+    if (!isStockLedgerCompanyActionRow(item.row["业务分类"])) continue;
+    const group = groups.get(stockLedgerSplitGroupKey(item.row)) ?? [];
+    group.push(item);
+    groups.set(stockLedgerSplitGroupKey(item.row), group);
+  }
+
+  const activities: TradeActivity[] = [];
+  let sequence = startSequence;
+  for (const groupRows of groups.values()) {
+    const first = groupRows[0]?.row;
+    if (!first) continue;
+    const instrument = parseWorkbookInstrument(first["股票代码"]);
+    if (!instrument) continue;
+    const { date, time } = normalizeWorkbookDateTime(first["业务时间"]);
+    if (!date) continue;
+
+    const quantities = groupRows.map((item) => parseNumber(String(item.row["数量"] ?? "")));
+    const splitFromQuantity = Math.abs(quantities.filter((quantity) => quantity < 0).reduce((sum, quantity) => sum + quantity, 0));
+    const splitToQuantity = quantities.filter((quantity) => quantity > 0).reduce((sum, quantity) => sum + quantity, 0);
+    if (splitFromQuantity <= 0 || splitToQuantity <= 0) continue;
+    const note = clean(String(first["备注"] ?? ""));
+    const splitRatio = stockSplitRatioFromNote(note) ?? splitToQuantity / splitFromQuantity;
+    if (!Number.isFinite(splitRatio) || splitRatio <= 0) continue;
+    const sourceRow = Math.min(...groupRows.map((item) => item.rowNumber));
+
+    activities.push({
+      id: `longbridge-stock-ledger-${date}-${time}-${sequence}-${instrument.currency}-${displayCode(instrument.code)}-stock-split`,
+      broker: "长桥",
+      date,
+      time,
+      sequence,
+      market: instrument.market,
+      currency: instrument.currency,
+      symbol: displayCode(instrument.code),
+      securityName: instrument.name,
+      side: "stock_split",
+      quantity: splitToQuantity,
+      amount: 0,
+      splitRatio,
+      splitFromQuantity,
+      splitToQuantity,
+      source: workbookSourceId(fileName, sourceRow),
+      note: `${stockSplitActionLabel(splitRatio)}：${formatQuantity(splitFromQuantity)} 股 -> ${formatQuantity(
+        splitToQuantity,
+      )} 股；长桥股票账户明细无成交金额，已排除税务成本重放${note ? `；${note}` : ""}`,
+      excludedFromTaxReplay: true,
+    });
+    sequence += 1;
+  }
+
+  return activities;
+}
+
+function parseLongbridgeStockLedgerWorkbook(fileName: string, workbook: XLSX.WorkBook): LongbridgeWorkbookData {
+  const sheetName = findStockLedgerSheetName(workbook);
+  if (!sheetName) {
+    throw new Error("未找到长桥股票账户明细表头。");
+  }
+
+  const rows = rowObjects(workbook, sheetName).map((row, index) => ({ row, rowNumber: index + 2 }));
+  const activities: TradeActivity[] = [];
+  let sequence = 0;
+  for (const item of rows) {
+    const activity = parseStockLedgerActivity(fileName, item.row, item.rowNumber, sequence);
+    if (!activity) continue;
+    activities.push(activity);
+    sequence += 1;
+  }
+  activities.push(...parseStockLedgerSplitActivities(fileName, rows, sequence));
+
+  const dates = activities.map((activity) => activity.date).sort();
+  const dateRange = dates.length > 0 ? `${dates[0]} 至 ${dates[dates.length - 1]}` : "未识别日期";
+  return {
+    activities,
+    statementDetected: true,
+    issues:
+      activities.length > 0
+        ? [
+            {
+              id: `${fileName}-stock-ledger-no-amounts`,
+              severity: "warning",
+              title: "长桥股票账户明细不含成交金额",
+              detail: `已读取 ${activities.length} 笔股票账户流水（${dateRange}），仅用于核对覆盖月份、买卖方向、转仓和公司行动；由于文件不含成交价、成交金额、费用或现金变动，已全部排除出盈亏/税额计算。请继续上传长桥 PDF 月结单或含成交金额的交易/资金流水。`,
+              source: fileName,
+            },
+          ]
+        : [
+            {
+              id: `${fileName}-stock-ledger-empty`,
+              severity: "warning",
+              title: "未识别到可用长桥股票账户流水",
+              detail: "已识别为长桥股票账户明细，但没有读取到买卖、转入或公司行动记录。",
+              source: fileName,
+            },
+          ],
+  };
+}
+
 function securityAliasKey(value: string) {
   return canonicalText(value)
     .toLowerCase()
@@ -491,6 +798,15 @@ function securityAliasKey(value: string) {
 function isSecurityCodeCandidate(value: string) {
   const text = value.trim();
   return /^\d{3,6}$/.test(text) || /^[A-Z]{1,6}$/.test(text) || /^HK\d{6,}$/i.test(text);
+}
+
+function segmentSecurityDelimiters(value: string) {
+  return clean(canonicalText(value).replace(/\s*([|/])\s*/g, " $1 "));
+}
+
+function leadingSecurityCode(value: string) {
+  const [code = ""] = segmentSecurityDelimiters(value).split(" ");
+  return isSecurityCodeCandidate(code) ? normalizeCode(code) : "";
 }
 
 function hasHongKongNameSuffix(value: string) {
@@ -527,15 +843,17 @@ function splitSecurity(
     return { ...alias, codeResolution: "known_alias" };
   }
 
-  const [code = "", ...nameParts] = text.split(" ");
+  const [code = "", ...nameParts] = segmentSecurityDelimiters(text).split(" ");
   if (isSecurityCodeCandidate(code)) {
     const codeAlias = documentAliases.get(securityAliasKey(code)) ?? KNOWN_SECURITY_ALIASES[securityAliasKey(code)];
     if (nameParts.length === 0 && codeAlias) {
       return { ...codeAlias, codeResolution: "known_alias" };
     }
+    const name = clean(canonicalText(nameParts.filter((part) => part !== "|" && part !== "/").join(" ")));
+    const nameIsCode = name && isSecurityCodeCandidate(name) && normalizeCode(name) === normalizeCode(code);
     return {
       code: normalizeCode(code),
-      name: nameParts.join(" ") || codeAlias?.name || displayCode(code),
+      name: name && !nameIsCode ? name : codeAlias?.name || displayCode(code),
       codeResolution: "explicit",
     };
   }
@@ -937,6 +1255,15 @@ function isStandaloneCashFlowCandidate(cashFlow: CashFlowRecord) {
   );
 }
 
+function isPositionMoveSecurityToken(value: string) {
+  return Boolean(leadingSecurityCode(value));
+}
+
+function isPositionMoveNoteToken(value: string) {
+  const text = canonicalText(value);
+  return text.includes("账户迁移") || text.includes("户口迁移") || text.includes("转仓") || text.includes("转入") || text.includes("转出");
+}
+
 function parsePositionMoveLine(
   sourcePdf: string,
   line: TextLine,
@@ -949,14 +1276,17 @@ function parsePositionMoveLine(
   const quantity = tokens.at(-1)?.text ?? "";
 
   const codeIndex = tokens.findIndex((token, index) => {
-    if (index < 2 || token.x > 320) return false;
-    return /^\d{3,5}$/.test(token.text) || /^[A-Z]{1,5}$/.test(token.text) || /^HK\d{6,}$/.test(token.text);
+    if (index < 2 || token.x > 380) return false;
+    return isPositionMoveSecurityToken(token.text);
   });
   if (codeIndex < 2) return null;
 
   const noteStartIndex = tokens.findIndex((token, index) => {
     if (index <= codeIndex || index >= tokens.length - 1) return false;
-    return token.x >= 340 || /^IPO\b/i.test(token.text) || token.text === "申购" || token.text === "赎回";
+    const text = canonicalText(token.text);
+    const isKnownNote = isPositionMoveNoteToken(text) || /^IPO\b/i.test(text) || text === "申购" || text === "赎回";
+    if (index === codeIndex + 1 && !isKnownNote) return false;
+    return token.x >= 340 || isKnownNote;
   });
   const itemEndIndex = noteStartIndex > 0 ? noteStartIndex : tokens.length - 1;
   const moveType = clean(tokens.slice(1, codeIndex).map((token) => token.text).join(" "));
@@ -1111,22 +1441,20 @@ function parseLongbridgeLines(
       statementMonth = `${statementMonthMatch[1]}-${statementMonthMatch[2]}`;
     }
     if (
-      /^Order Time\s+Transaction Time\s+Quantity\s+Price$/i.test(text) ||
-      (text.includes("下单时间") && text.includes("成交时间") && text.includes("数量") && text.includes("平均价格"))
+      (/Order Time/i.test(text) && /Transaction Time/i.test(text)) ||
+      (text.includes("下单时间") && text.includes("成交时间"))
     ) {
       readingTradeTimes = true;
       continue;
     }
     if (readingTradeTimes) {
-      const tradeTimeMatch = text.match(/^\d{2}:\d{2}:\d{2}\s+\S+\s+(\d{2}:\d{2}:\d{2})\s+\S+/);
-      if (tradeTimeMatch && lastTradeForTime) {
-        lastTradeForTime.tradeTime =
-          lastTradeForTime.tradeTime && lastTradeForTime.tradeTime < tradeTimeMatch[1]
-            ? lastTradeForTime.tradeTime
-            : tradeTimeMatch[1];
+      if (assignTradeTimeFromDetailLine(lastTradeForTime, text)) {
         continue;
       }
       readingTradeTimes = false;
+    }
+    if (activeTable === "stock_trade" && assignTradeTimeFromDetailLine(lastTradeForTime, text)) {
+      continue;
     }
     if (text.includes("项目") && text.includes("期初持仓") && text.includes("浮动盈亏")) {
       activeTable = "portfolio";
@@ -1442,6 +1770,78 @@ function stateAvgCost(state: PositionState) {
   return Math.abs(state.quantity) < 1e-9 ? 0 : state.costBasis / state.quantity;
 }
 
+function eventSecurityKey(event: Pick<EventRecord, "currency" | "code">) {
+  return `${event.currency}::${normalizeCode(event.code)}`;
+}
+
+function eventUsageKey(event: EventRecord) {
+  return `${event.date}::${event.sequence}::${event.currency}::${normalizeCode(event.code)}::${event.kind}`;
+}
+
+function explicitBuyCostBasis(event: EventRecord) {
+  if (event.kind !== "buy") return null;
+  const costBasis = -event.cash;
+  if (!Number.isFinite(costBasis) || costBasis <= 0 || event.quantity <= 1e-8) return null;
+  return costBasis;
+}
+
+function consumeRemainingBuyCost(
+  event: EventRecord,
+  quantity: number,
+  usages: Map<string, { quantity: number; costBasis: number }>,
+) {
+  const costBasis = explicitBuyCostBasis(event);
+  if (costBasis === null || event.kind !== "buy") return { quantity: 0, costBasis: 0 };
+
+  const usageKey = eventUsageKey(event);
+  const used = usages.get(usageKey) ?? { quantity: 0, costBasis: 0 };
+  const remainingQuantity = Math.max(0, event.quantity - used.quantity);
+  const remainingCostBasis = Math.max(0, costBasis - used.costBasis);
+  if (remainingQuantity <= 1e-8 || remainingCostBasis <= 1e-8) return { quantity: 0, costBasis: 0 };
+
+  const consumedQuantity = Math.min(quantity, remainingQuantity);
+  const consumedCostBasis = (remainingCostBasis * consumedQuantity) / remainingQuantity;
+  return { quantity: consumedQuantity, costBasis: consumedCostBasis };
+}
+
+function borrowLaterSameDayBuyCost(
+  events: EventRecord[],
+  sellIndex: number,
+  sellEvent: Extract<EventRecord, { kind: "sell" }>,
+  shortage: number,
+  usages: Map<string, { quantity: number; costBasis: number }>,
+) {
+  if (shortage <= 1e-8) return null;
+  const securityKey = eventSecurityKey(sellEvent);
+  const borrowed: Array<{ key: string; quantity: number; costBasis: number }> = [];
+  let borrowedQuantity = 0;
+  let borrowedCostBasis = 0;
+
+  for (let index = sellIndex + 1; index < events.length && borrowedQuantity + 1e-8 < shortage; index += 1) {
+    const event = events[index];
+    if (event.date !== sellEvent.date) break;
+    if (event.kind !== "buy" || eventSecurityKey(event) !== securityKey) continue;
+
+    const consumed = consumeRemainingBuyCost(event, shortage - borrowedQuantity, usages);
+    if (consumed.quantity <= 1e-8) continue;
+    borrowed.push({ key: eventUsageKey(event), ...consumed });
+    borrowedQuantity += consumed.quantity;
+    borrowedCostBasis += consumed.costBasis;
+  }
+
+  if (borrowedQuantity + 1e-8 < shortage) return null;
+
+  for (const item of borrowed) {
+    const used = usages.get(item.key) ?? { quantity: 0, costBasis: 0 };
+    usages.set(item.key, {
+      quantity: used.quantity + item.quantity,
+      costBasis: used.costBasis + item.costBasis,
+    });
+  }
+
+  return { quantity: borrowedQuantity, costBasis: borrowedCostBasis };
+}
+
 function manualCostMap(manualCosts: ManualCostInput[] = []) {
   const costs = new Map<string, number>();
   for (const item of manualCosts) {
@@ -1484,6 +1884,69 @@ function compareStockTrades(a: StockTradeRecord, b: StockTradeRecord) {
 function fallbackOpeningCost(position: PortfolioRecord) {
   if (!Number.isFinite(position.avgCost) || position.avgCost <= 0) return null;
   return position.beginQty * position.avgCost;
+}
+
+function quantityTolerance(quantity: number) {
+  return Math.max(1e-6, Math.abs(quantity) * 1e-6);
+}
+
+function priorTradeQuantityBeforeStatement(raw: LongbridgeRawData, position: PortfolioRecord) {
+  const statementMonth = portfolioStatementMonth(position);
+  if (!statementMonth) return 0;
+  const cutoffDate = `${statementMonth}-01`;
+
+  return raw.trades
+    .filter((trade) => isSameSecurity(position, trade) && normalizeDate(trade.tradeDate) < cutoffDate)
+    .sort(compareStockTrades)
+    .reduce((quantity, trade) => {
+      if (isBuySide(trade.side)) return quantity + trade.quantity;
+      if (isSellSide(trade.side)) return Math.max(0, quantity - trade.quantity);
+      return quantity;
+    }, 0);
+}
+
+function hasEarlierTradeCoverage(raw: LongbridgeRawData, position: PortfolioRecord) {
+  return priorTradeQuantityBeforeStatement(raw, position) + quantityTolerance(position.beginQty) >= position.beginQty;
+}
+
+function isTransferInMove(move: Pick<PositionMoveRecord, "moveType" | "note">) {
+  const moveType = canonicalText(move.moveType);
+  const note = canonicalText(move.note);
+  return moveType.includes("证券转入") || moveType.includes("股票进账") || (moveType.includes("进账") && note.includes("账户迁移"));
+}
+
+function isTransferOutMove(move: Pick<PositionMoveRecord, "moveType" | "note">) {
+  const moveType = canonicalText(move.moveType);
+  const note = canonicalText(move.note);
+  return moveType.includes("证券转出") || moveType.includes("股票出账") || (moveType.includes("出账") && note.includes("账户迁移"));
+}
+
+function priorMoveQuantityBeforeStatement(raw: LongbridgeRawData, position: PortfolioRecord) {
+  const statementMonth = portfolioStatementMonth(position);
+  if (!statementMonth) return 0;
+  const cutoffDate = `${statementMonth}-01`;
+  const key = securityPositionKey(position.currency, position.code);
+
+  return raw.moves
+    .filter((move) => {
+      const moveType = canonicalText(move.moveType);
+      return (
+        normalizeDate(move.date) < cutoffDate &&
+        securityPositionKey(position.currency, move.code) === key &&
+        move.quantity > 0 &&
+        (isTransferInMove(move) || moveType.includes("中签"))
+      );
+    })
+    .sort((a, b) => normalizeDate(a.date).localeCompare(normalizeDate(b.date)))
+    .reduce((quantity, move) => quantity + move.quantity, 0);
+}
+
+function hasEarlierMoveCoverage(raw: LongbridgeRawData, position: PortfolioRecord) {
+  return priorMoveQuantityBeforeStatement(raw, position) + quantityTolerance(position.beginQty) >= position.beginQty;
+}
+
+function isOpeningPositionAlreadyCovered(raw: LongbridgeRawData, position: PortfolioRecord) {
+  return hasEarlierTradeCoverage(raw, position) || hasEarlierMoveCoverage(raw, position);
 }
 
 function deriveOpeningCostFromStatement(raw: LongbridgeRawData, position: PortfolioRecord) {
@@ -1545,6 +2008,7 @@ function buildOpeningPositionEvents(raw: LongbridgeRawData, startSequence: numbe
   let estimatedCount = 0;
 
   for (const position of earliestPositions.values()) {
+    if (isOpeningPositionAlreadyCovered(raw, position)) continue;
     const cost = deriveOpeningCostFromStatement(raw, position);
     if (cost === null || cost <= 0) continue;
     const statementMonth = portfolioStatementMonth(position);
@@ -1824,7 +2288,7 @@ function buildRealizedTrades(
         note: move.note,
       });
       sequence += 1;
-    } else if (moveType.includes("证券转入")) {
+    } else if (isTransferInMove(move)) {
       const position = portfolioLookup.get(`${move.sourcePdf}::${move.code}`);
       events.push({
         kind: "transfer_in",
@@ -1837,18 +2301,18 @@ function buildRealizedTrades(
         name: move.name,
         quantity: move.quantity,
         cost: move.quantity * (position?.avgCost ?? 0),
-        source: "证券转入-按长桥月末成本基准",
-        note: "转入成本需用原券商成本凭证复核",
+        source: `${move.moveType}-按长桥月末成本基准`,
+        note: `${move.note ? `${move.note}；` : ""}转入成本需用原券商成本凭证复核`,
       });
       issues.push({
         id: `${move.sourcePdf}-${move.code}-transfer-in`,
         severity: "warning",
-        title: `${displayCode(move.code)} 转入成本需复核`,
+        title: `${displayCode(move.code)} ${move.moveType}成本需复核`,
         detail: "已按长桥月结单月末成本基准暂估；正式申报建议用转出券商原始成本凭证确认。",
         source: move.sourcePdf,
       });
       sequence += 1;
-    } else if (moveType.includes("证券转出")) {
+    } else if (isTransferOutMove(move)) {
       const position = portfolioLookup.get(`${move.sourcePdf}::${move.code}`);
       events.push({
         kind: "transfer_out",
@@ -1860,13 +2324,13 @@ function buildRealizedTrades(
         code: move.code,
         name: move.name,
         quantity: Math.abs(move.quantity),
-        source: "证券转出",
-        note: "转仓，不按卖出确认收益",
+        source: move.moveType,
+        note: `${move.note ? `${move.note}；` : ""}转仓，不按卖出确认收益`,
       });
       issues.push({
         id: `${move.sourcePdf}-${move.code}-transfer-out`,
         severity: "warning",
-        title: `${displayCode(move.code)} 已转出，未在长桥实现卖出`,
+        title: `${displayCode(move.code)} ${move.moveType}，未在长桥实现卖出`,
         detail: "证券转出不按卖出确认收益；如果转出后在其他券商卖出，需要继续接入该券商记录。",
         source: move.sourcePdf,
       });
@@ -1909,9 +2373,11 @@ function buildRealizedTrades(
 
   const states = new Map<string, PositionState>();
   const realizedTrades: RealizedTrade[] = [];
+  const futureBuyUsages = new Map<string, { quantity: number; costBasis: number }>();
 
-  for (const event of events) {
-    const key = `${event.currency}::${event.code}`;
+  for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+    const event = events[eventIndex];
+    const key = eventSecurityKey(event);
     const state = states.get(key) ?? {
       market: event.market,
       currency: event.currency,
@@ -1956,9 +2422,24 @@ function buildRealizedTrades(
       state.quantity += event.quantity;
       state.costBasis += event.cost;
     } else if (event.kind === "buy") {
-      state.quantity += event.quantity;
-      state.costBasis += -event.cash;
+      const usedByEarlierSell = futureBuyUsages.get(eventUsageKey(event)) ?? { quantity: 0, costBasis: 0 };
+      const remainingQuantity = Math.max(0, event.quantity - usedByEarlierSell.quantity);
+      const remainingCostBasis = Math.max(0, -event.cash - usedByEarlierSell.costBasis);
+      if (remainingQuantity > 1e-8) {
+        state.quantity += remainingQuantity;
+        state.costBasis += remainingCostBasis;
+      }
     } else if (event.kind === "sell") {
+      let borrowedCostForSell: { quantity: number; costBasis: number } | null = null;
+      if (state.quantity + 1e-7 < event.quantity) {
+        const shortage = event.quantity - state.quantity;
+        borrowedCostForSell = borrowLaterSameDayBuyCost(events, eventIndex, event, shortage, futureBuyUsages);
+        if (borrowedCostForSell) {
+          state.quantity += borrowedCostForSell.quantity;
+          state.costBasis += borrowedCostForSell.costBasis;
+        }
+      }
+
       if (state.quantity + 1e-7 < event.quantity) {
         if (targetYear === undefined || event.date.startsWith(String(targetYear))) {
           const symbol = displayCode(event.code);
@@ -2016,7 +2497,11 @@ function buildRealizedTrades(
         costBasis,
         gainLoss,
         source: event.source,
-        note: event.note,
+        note: borrowedCostForSell
+          ? `${event.note}；长桥月结单同日成交顺序异常，已用同日后续买入 ${formatQuantity(
+              borrowedCostForSell.quantity,
+            )} 股成本回补。`
+          : event.note,
       };
       realizedTrades.push(trade);
       state.quantity -= event.quantity;
@@ -2083,6 +2568,7 @@ function buildRealizedTrades(
       symbol: item.symbol,
       securityName: item.securityName,
       quantity: item.quantity,
+      trackedQuantity: item.trackedQuantity,
       proceeds: item.proceeds,
       source: item.source,
       note: item.note,
@@ -2138,7 +2624,7 @@ function buildOpenPositions(raw: LongbridgeRawData): OpenPosition[] {
     });
 }
 
-export async function parseLongbridgePdfs(
+async function parseLongbridgeInputs(
   files: LongbridgeFileInput[],
   password?: string,
   options: { targetYear?: number; manualCosts?: ManualCostInput[]; securityAliases?: ManualSecurityAliasInput[] } = {},
@@ -2152,24 +2638,33 @@ export async function parseLongbridgePdfs(
     issues: [],
     statementDetected: false,
   };
+  const ledgerActivities: TradeActivity[] = [];
 
   for (const file of files) {
     try {
-      const lines = await extractPdfLines(file.name, file.data, password);
-      const fileRaw = parseLongbridgeLines(file.name, lines, options.securityAliases ?? []);
-      await attachDividendScreenshots(file.name, file.data, password, fileRaw.cashFlows);
-      raw.trades.push(...fileRaw.trades);
-      raw.cashFlows.push(...fileRaw.cashFlows);
-      raw.moves.push(...fileRaw.moves);
-      raw.positions.push(...fileRaw.positions);
-      raw.issues.push(...fileRaw.issues);
-      raw.statementDetected = raw.statementDetected || fileRaw.statementDetected;
+      if (/\.(xlsx|xls)$/i.test(file.name)) {
+        const workbook = XLSX.read(file.data, { type: "array", cellDates: false });
+        const workbookData = parseLongbridgeStockLedgerWorkbook(file.name, workbook);
+        ledgerActivities.push(...workbookData.activities);
+        raw.issues.push(...workbookData.issues);
+        raw.statementDetected = raw.statementDetected || workbookData.statementDetected;
+      } else {
+        const lines = await extractPdfLines(file.name, file.data, password);
+        const fileRaw = parseLongbridgeLines(file.name, lines, options.securityAliases ?? []);
+        await attachDividendScreenshots(file.name, file.data, password, fileRaw.cashFlows);
+        raw.trades.push(...fileRaw.trades);
+        raw.cashFlows.push(...fileRaw.cashFlows);
+        raw.moves.push(...fileRaw.moves);
+        raw.positions.push(...fileRaw.positions);
+        raw.issues.push(...fileRaw.issues);
+        raw.statementDetected = raw.statementDetected || fileRaw.statementDetected;
+      }
     } catch (error) {
       raw.issues.push({
-        id: `${file.name}-pdf-error`,
+        id: /\.(xlsx|xls)$/i.test(file.name) ? `${file.name}-xlsx-error` : `${file.name}-pdf-error`,
         severity: "blocking",
-        title: "长桥PDF解析失败",
-        detail: error instanceof Error ? error.message : "未知PDF解析错误。请确认密码是否正确。",
+        title: /\.(xlsx|xls)$/i.test(file.name) ? "长桥Excel解析失败" : "长桥PDF解析失败",
+        detail: error instanceof Error ? error.message : "未知解析错误。请确认文件格式是否正确。",
         source: file.name,
       });
     }
@@ -2177,13 +2672,18 @@ export async function parseLongbridgePdfs(
 
   const realized = buildRealizedTrades(raw, options.targetYear, options.manualCosts ?? []);
   parsed.realizedTrades.push(...realized.trades);
-  parsed.tradeActivities.push(...realized.activities);
+  parsed.tradeActivities.push(...realized.activities, ...ledgerActivities);
   parsed.dividends.push(...buildDividends(raw.cashFlows));
   parsed.openPositions.push(...buildOpenPositions(raw));
   parsed.issues.push(...raw.issues, ...realized.issues);
   parsed.costBasisRequests.push(...realized.costBasisRequests);
 
-  const hasParsedStatementRows = raw.trades.length > 0 || raw.cashFlows.length > 0 || raw.moves.length > 0 || raw.positions.length > 0;
+  const hasParsedStatementRows =
+    raw.trades.length > 0 ||
+    raw.cashFlows.length > 0 ||
+    raw.moves.length > 0 ||
+    raw.positions.length > 0 ||
+    ledgerActivities.length > 0;
   const hasRecognizedStatement = raw.statementDetected || hasParsedStatementRows;
 
   if (!hasParsedStatementRows && !hasRecognizedStatement && files.length > 0) {
@@ -2191,11 +2691,11 @@ export async function parseLongbridgePdfs(
       id: "longbridge-invalid-format",
       severity: "blocking",
       title: "长桥文件格式不符合要求",
-      detail: "长桥只支持 PDF 月结单。当前文件没有识别到账户流水、股票交易、持仓或资产进出表，请确认上传的是长桥月结单 PDF 且密码正确。",
+      detail: "长桥支持 PDF 月结单和股票账户明细 Excel。当前文件没有识别到账户流水、股票交易、持仓或资产进出表，请确认上传的是受支持的长桥文件。",
     });
   }
 
-  if (raw.trades.length === 0 && files.length > 0) {
+  if (raw.trades.length === 0 && ledgerActivities.length === 0 && files.length > 0) {
     parsed.issues.push({
       id: hasRecognizedStatement ? "longbridge-no-stock-activity" : "longbridge-no-trades",
       severity: hasRecognizedStatement ? "info" : "warning",
@@ -2207,4 +2707,20 @@ export async function parseLongbridgePdfs(
   }
 
   return parsed;
+}
+
+export async function parseLongbridgeFiles(
+  files: LongbridgeFileInput[],
+  password?: string,
+  options: { targetYear?: number; manualCosts?: ManualCostInput[]; securityAliases?: ManualSecurityAliasInput[] } = {},
+): Promise<ParsedInput> {
+  return parseLongbridgeInputs(files, password, options);
+}
+
+export async function parseLongbridgePdfs(
+  files: LongbridgeFileInput[],
+  password?: string,
+  options: { targetYear?: number; manualCosts?: ManualCostInput[]; securityAliases?: ManualSecurityAliasInput[] } = {},
+): Promise<ParsedInput> {
+  return parseLongbridgeInputs(files, password, options);
 }

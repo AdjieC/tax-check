@@ -2,6 +2,7 @@ import { defaultTaxConfig } from "./config";
 import type {
   BrokerSummary,
   CostBasisCorrection,
+  CostBasisRequest,
   CostBasisMethod,
   Currency,
   CurrencySummary,
@@ -20,6 +21,16 @@ import type {
 
 function key(parts: Array<string | number>) {
   return parts.join("::");
+}
+
+function normalizedSecuritySymbol(value: string) {
+  const text = String(value ?? "").trim().toUpperCase();
+  return /^\d+$/.test(text) ? text.replace(/^0+/, "") || "0" : text;
+}
+
+function displaySecuritySymbol(value: string) {
+  const text = String(value ?? "").trim().toUpperCase();
+  return /^\d+$/.test(text) ? text.padStart(5, "0") : text;
 }
 
 export function toRmb(amount: number, currency: Currency, config: TaxConfig) {
@@ -128,16 +139,20 @@ interface ReplayState {
   shortLots: Array<{ quantity: number; proceeds: number }>;
 }
 
-function tradeKey(trade: Pick<RealizedTrade, "broker" | "currency" | "symbol">) {
-  return key([trade.broker, trade.currency, trade.symbol]);
+function brokerSecurityKey(item: Pick<RealizedTrade, "broker" | "currency" | "symbol">) {
+  return key([item.broker, item.currency, normalizedSecuritySymbol(item.symbol)]);
 }
 
-function activityKey(activity: Pick<TradeActivity, "broker" | "currency" | "symbol">) {
-  return key([activity.broker, activity.currency, activity.symbol]);
+function securityKey(item: Pick<TradeActivity | RealizedTrade | OpenPosition | CostBasisRequest, "currency" | "symbol">) {
+  return key([item.currency, normalizedSecuritySymbol(item.symbol)]);
 }
 
-function positionKey(position: Pick<OpenPosition, "broker" | "currency" | "symbol">) {
-  return key([position.broker, position.currency, position.symbol]);
+function activitySecurityKey(activity: Pick<TradeActivity, "broker" | "currency" | "symbol">) {
+  return brokerSecurityKey(activity);
+}
+
+function positionSecurityKey(position: Pick<OpenPosition, "broker" | "currency" | "symbol">) {
+  return brokerSecurityKey(position);
 }
 
 function reportedSellKey(trade: RealizedTrade) {
@@ -204,7 +219,9 @@ function sortActivities(activities: TradeActivity[]) {
       a.date.localeCompare(b.date) ||
       rank[a.side] - rank[b.side] ||
       (a.time ?? "99:99:99").localeCompare(b.time ?? "99:99:99") ||
-      (a.sequence ?? 0) - (b.sequence ?? 0)
+      (a.sequence ?? 0) - (b.sequence ?? 0) ||
+      a.broker.localeCompare(b.broker) ||
+      a.id.localeCompare(b.id)
     );
   });
 }
@@ -361,24 +378,113 @@ function quantityMatches(left: number, right: number) {
   return Math.abs(left - right) <= Math.max(1e-7, Math.abs(right) * 1e-7);
 }
 
+function activityUsageKey(activity: TradeActivity) {
+  return key([
+    activity.id ?? "",
+    activity.broker,
+    activity.date,
+    activity.time ?? "",
+    activity.sequence ?? "",
+    activity.currency,
+    normalizedSecuritySymbol(activity.symbol),
+    activity.side,
+  ]);
+}
+
+function explicitActivityBuyCostBasis(activity: TradeActivity) {
+  if (activity.side !== "buy") return null;
+  if (activity.quantity <= 1e-8) return null;
+
+  const amount = Number(activity.amount);
+  if (Number.isFinite(amount) && amount > 0) return amount;
+
+  const grossAmount = Number(activity.grossAmount);
+  if (Number.isFinite(grossAmount) && grossAmount > 0) return grossAmount;
+
+  const unitPrice = Number(activity.unitPrice);
+  if (Number.isFinite(unitPrice) && unitPrice > 0) return unitPrice * activity.quantity;
+
+  return null;
+}
+
+function consumeRemainingActivityBuyCost(
+  activity: TradeActivity,
+  quantity: number,
+  usages: Map<string, { quantity: number; costBasis: number }>,
+) {
+  const costBasis = explicitActivityBuyCostBasis(activity);
+  if (costBasis === null) return { quantity: 0, costBasis: 0 };
+
+  const usageKey = activityUsageKey(activity);
+  const used = usages.get(usageKey) ?? { quantity: 0, costBasis: 0 };
+  const remainingQuantity = Math.max(0, activity.quantity - used.quantity);
+  const remainingCostBasis = Math.max(0, costBasis - used.costBasis);
+  if (remainingQuantity <= 1e-8 || remainingCostBasis <= 1e-8) return { quantity: 0, costBasis: 0 };
+
+  const consumedQuantity = Math.min(quantity, remainingQuantity);
+  const consumedCostBasis = (remainingCostBasis * consumedQuantity) / remainingQuantity;
+  return { quantity: consumedQuantity, costBasis: consumedCostBasis };
+}
+
+function borrowLaterSameDayLongbridgeBuyCost(
+  activities: TradeActivity[],
+  sellIndex: number,
+  sellActivity: TradeActivity,
+  shortage: number,
+  usages: Map<string, { quantity: number; costBasis: number }>,
+) {
+  if (sellActivity.broker !== "长桥" || shortage <= 1e-8) return null;
+  const securityKey = activitySecurityKey(sellActivity);
+  const borrowed: Array<{ key: string; quantity: number; costBasis: number }> = [];
+  let borrowedQuantity = 0;
+  let borrowedCostBasis = 0;
+
+  for (let index = sellIndex + 1; index < activities.length && borrowedQuantity + 1e-8 < shortage; index += 1) {
+    const activity = activities[index];
+    if (activity.date !== sellActivity.date) break;
+    if (activity.broker !== "长桥" || activity.side !== "buy" || activitySecurityKey(activity) !== securityKey) continue;
+
+    const consumed = consumeRemainingActivityBuyCost(activity, shortage - borrowedQuantity, usages);
+    if (consumed.quantity <= 1e-8) continue;
+    borrowed.push({ key: activityUsageKey(activity), ...consumed });
+    borrowedQuantity += consumed.quantity;
+    borrowedCostBasis += consumed.costBasis;
+  }
+
+  if (borrowedQuantity + 1e-8 < shortage) return null;
+
+  for (const item of borrowed) {
+    const used = usages.get(item.key) ?? { quantity: 0, costBasis: 0 };
+    usages.set(item.key, {
+      quantity: used.quantity + item.quantity,
+      costBasis: used.costBasis + item.costBasis,
+    });
+  }
+
+  return { quantity: borrowedQuantity, costBasis: borrowedCostBasis };
+}
+
 function replayScenario(
   input: ParsedInput,
   window: TaxWindow,
   costBasisMethod: CostBasisMethod,
   config: TaxConfig,
 ) {
-  const excludedKeys = new Set(input.realizedTrades.filter((trade) => trade.excluded).map(tradeKey));
+  const excludedKeys = new Set(input.realizedTrades.filter((trade) => trade.excluded).map(brokerSecurityKey));
   const reportedSellKeys = new Set(
     input.realizedTrades.filter((trade) => trade.useBrokerReportedGainLoss && !trade.excluded).map(reportedSellKey),
   );
   const states = new Map<string, ReplayState>();
   const trades: RealizedTrade[] = [];
+  const replayActivities = sortActivities(synthesizeActivities(input)).filter((item) => !item.excludedFromTaxReplay);
+  const futureBuyUsages = new Map<string, { quantity: number; costBasis: number }>();
   let missingCostIssueCount = 0;
 
-  for (const activity of sortActivities(synthesizeActivities(input)).filter((item) => !item.excludedFromTaxReplay)) {
+  for (let activityIndex = 0; activityIndex < replayActivities.length; activityIndex += 1) {
+    const activity = replayActivities[activityIndex];
     if (activity.date > window.end) break;
     const state =
-      states.get(activityKey(activity)) ??
+      states.get(activitySecurityKey(activity)) ??
       ({
         market: activity.market,
         currency: activity.currency,
@@ -432,26 +538,34 @@ function replayScenario(
       ) {
         state.quantity = creditedQuantity;
       }
-    } else if (activity.side === "buy" || activity.side === "acquire" || activity.side === "transfer_in") {
+    } else if (activity.side === "buy") {
+      const usedByEarlierSell = futureBuyUsages.get(activityUsageKey(activity)) ?? { quantity: 0, costBasis: 0 };
+      const explicitCostBasis = explicitActivityBuyCostBasis(activity) ?? activity.amount;
+      const remainingQuantity = Math.max(0, activity.quantity - usedByEarlierSell.quantity);
+      const remainingCostBasis = Math.max(0, explicitCostBasis - usedByEarlierSell.costBasis);
+      if (remainingQuantity > 1e-8) {
+        addCost(state, remainingQuantity, remainingCostBasis);
+      }
+    } else if (activity.side === "acquire" || activity.side === "transfer_in") {
       addCost(state, activity.quantity, activity.amount);
     } else if (activity.side === "short_open") {
       addShortProceeds(state, activity.quantity, activity.amount);
     } else if (activity.side === "short_close") {
       if (state.shortQuantity + 1e-7 < activity.quantity) {
-        if (inWindow(activity.date, window) && !excludedKeys.has(activityKey(activity))) {
+        if (inWindow(activity.date, window) && !excludedKeys.has(brokerSecurityKey(activity))) {
           missingCostIssueCount += 1;
         }
         state.shortQuantity = 0;
         state.shortProceeds = 0;
         state.shortLots = [];
-        states.set(activityKey(activity), state);
+        states.set(activitySecurityKey(activity), state);
         continue;
       }
 
       const proceeds =
         costBasisMethod === "fifo" ? consumeShortFifo(state, activity.quantity) : consumeShortAcb(state, activity.quantity);
       const costBasis = activity.amount;
-      if (inWindow(activity.date, window) && !excludedKeys.has(activityKey(activity))) {
+      if (inWindow(activity.date, window) && !excludedKeys.has(brokerSecurityKey(activity))) {
         trades.push({
           id: `${activity.id}-${window.mode}-${costBasisMethod}`,
           broker: activity.broker,
@@ -471,10 +585,25 @@ function replayScenario(
         });
       }
     } else if (activity.side === "sell") {
+      let borrowedCostForSell: { quantity: number; costBasis: number } | null = null;
+      if (state.quantity + 1e-7 < activity.quantity) {
+        const shortage = activity.quantity - state.quantity;
+        borrowedCostForSell = borrowLaterSameDayLongbridgeBuyCost(
+          replayActivities,
+          activityIndex,
+          activity,
+          shortage,
+          futureBuyUsages,
+        );
+        if (borrowedCostForSell) {
+          addCost(state, borrowedCostForSell.quantity, borrowedCostForSell.costBasis);
+        }
+      }
+
       if (state.quantity + 1e-7 < activity.quantity) {
         if (
           inWindow(activity.date, window) &&
-          !excludedKeys.has(activityKey(activity)) &&
+          !excludedKeys.has(brokerSecurityKey(activity)) &&
           !reportedSellKeys.has(activitySellKey(activity))
         ) {
           missingCostIssueCount += 1;
@@ -482,12 +611,12 @@ function replayScenario(
         state.quantity = 0;
         state.costBasis = 0;
         state.lots = [];
-        states.set(activityKey(activity), state);
+        states.set(activitySecurityKey(activity), state);
         continue;
       }
       const costBasis =
         costBasisMethod === "fifo" ? consumeFifo(state, activity.quantity) : consumeAcb(state, activity.quantity);
-      if (inWindow(activity.date, window) && !excludedKeys.has(activityKey(activity))) {
+      if (inWindow(activity.date, window) && !excludedKeys.has(brokerSecurityKey(activity))) {
         trades.push({
           id: `${activity.id}-${window.mode}-${costBasisMethod}`,
           broker: activity.broker,
@@ -503,7 +632,11 @@ function replayScenario(
           costBasis,
           gainLoss: activity.amount - costBasis,
           source: activity.source,
-          note: activity.note,
+          note: borrowedCostForSell
+            ? `${activity.note ? `${activity.note}；` : ""}长桥月结单同日成交顺序异常，已用同日后续买入 ${roundMoney(
+                borrowedCostForSell.quantity,
+              )} 股成本回补。`
+            : activity.note,
         });
       }
     } else {
@@ -520,7 +653,7 @@ function replayScenario(
       }
     }
 
-    states.set(activityKey(activity), state);
+    states.set(activitySecurityKey(activity), state);
   }
 
   const capitalGainRmb = trades.reduce((sum, trade) => sum + toRmb(trade.gainLoss, trade.currency, config), 0);
@@ -543,7 +676,7 @@ function enrichOpenPositionsWithEndingCosts(
 ): OpenPosition[] {
   return positions.map((position) => {
     if (Number.isFinite(position.costBasis) && Number.isFinite(position.unrealizedGainLoss)) return position;
-    const state = endingStates.get(positionKey(position));
+    const state = endingStates.get(positionSecurityKey(position));
     if (!state || state.quantity <= 1e-8 || !quantityMatches(state.quantity, position.quantity)) return position;
 
     const costBasis = roundMoney(state.costBasis);
@@ -561,6 +694,12 @@ function brokerReportedTradesInWindow(input: ParsedInput, window: TaxWindow) {
   return input.realizedTrades.filter((trade) => trade.useBrokerReportedGainLoss && !trade.excluded && inWindow(trade.sellDate, window));
 }
 
+function combineReplayAndBrokerReportedTrades(replayTrades: RealizedTrade[], brokerReportedTrades: RealizedTrade[]) {
+  if (brokerReportedTrades.length === 0) return replayTrades;
+  const brokerReportedKeys = new Set(brokerReportedTrades.map(reportedSellKey));
+  return [...replayTrades.filter((trade) => !brokerReportedKeys.has(reportedSellKey(trade))), ...brokerReportedTrades];
+}
+
 function costCorrectionMap(corrections: CostBasisCorrection[] = []) {
   const map = new Map<string, number>();
   for (const correction of corrections) {
@@ -569,6 +708,56 @@ function costCorrectionMap(corrections: CostBasisCorrection[] = []) {
     map.set(correction.id, correction.costBasis);
   }
   return map;
+}
+
+function numberClose(left: number, right: number, tolerance = 0.01) {
+  return Math.abs(left - right) <= tolerance;
+}
+
+function costBasisRequestMatchesTrade(request: CostBasisRequest, trade: RealizedTrade) {
+  if (request.broker !== trade.broker) return false;
+  if (request.currency !== trade.currency) return false;
+  if (normalizedSecuritySymbol(request.symbol) !== normalizedSecuritySymbol(trade.symbol)) return false;
+  if (request.sellDate !== trade.sellDate) return false;
+  if (!numberClose(request.quantity, trade.quantity, 1e-6)) return false;
+
+  if (Number.isFinite(request.sequence) && Number.isFinite(trade.sequence)) {
+    return request.sequence === trade.sequence;
+  }
+  if (request.time && trade.time && request.time !== "99:99:99" && trade.time !== "99:99:99") {
+    return request.time === trade.time;
+  }
+  return numberClose(request.proceeds, trade.proceeds);
+}
+
+function filterResolvedCostBasisRequests(requests: CostBasisRequest[], trades: RealizedTrade[]) {
+  return requests.filter((request) => !trades.some((trade) => costBasisRequestMatchesTrade(request, trade)));
+}
+
+function canApplyActivityCostCorrection(activity: TradeActivity) {
+  return activity.side === "transfer_in" || activity.side === "acquire";
+}
+
+function applyActivityCostCorrections(input: ParsedInput, corrections: CostBasisCorrection[] = []) {
+  if (corrections.length === 0) return input;
+  const correctionsById = costCorrectionMap(corrections);
+  if (correctionsById.size === 0) return input;
+
+  let changed = false;
+  const tradeActivities = input.tradeActivities.map((activity) => {
+    const correction = correctionsById.get(activity.id);
+    if (correction === undefined || !canApplyActivityCostCorrection(activity)) return activity;
+    changed = true;
+    const costBasis = roundMoney(correction);
+    return {
+      ...activity,
+      amount: costBasis,
+      note: `${activity.note ? `${activity.note}；` : ""}用户手动订正转入成本：${costBasis}`,
+      excludedFromTaxReplay: false,
+    };
+  });
+
+  return changed ? { ...input, tradeActivities } : input;
 }
 
 function applyCostCorrections(trades: RealizedTrade[], corrections: CostBasisCorrection[] = []) {
@@ -602,14 +791,18 @@ function buildTaxScenarios(
   selectedYear?: number,
   costCorrections: CostBasisCorrection[] = [],
 ): TaxScenarioSummary[] {
-  const targetYear = selectedYear ?? maxActivityYear(input);
+  const correctedInput = applyActivityCostCorrections(input, costCorrections);
+  const targetYear = selectedYear ?? maxActivityYear(correctedInput);
   return taxWindows(targetYear).flatMap((window) => {
     return (["fifo", "acb"] as const).map((method) => {
-      const result = replayScenario(input, window, method, config);
-      const trades = applyCostCorrections([...result.trades, ...brokerReportedTradesInWindow(input, window)], costCorrections);
+      const result = replayScenario(correctedInput, window, method, config);
+      const trades = applyCostCorrections(
+        combineReplayAndBrokerReportedTrades(result.trades, brokerReportedTradesInWindow(correctedInput, window)),
+        costCorrections,
+      );
       const id = `calendar-${method}` as TaxScenarioId;
       const capitalGainRmb = capitalGainRmbFromTrades(trades, config);
-      const activeSummaries = activeTaxStatementSummaries(input, window);
+      const activeSummaries = activeTaxStatementSummaries(correctedInput, window);
       const summaryCapitalGainRmb = activeSummaries.reduce(
         (sum, summary) => sum + toRmb(summary.realizedGainLoss, summary.currency, config),
         0,
@@ -648,13 +841,15 @@ export function analyzeTaxInput(
   const currencyMap = new Map<Currency, CurrencySummary>();
 
   for (const trade of included) {
-    const symbolKey = key([trade.broker, trade.currency, trade.symbol]);
+    const symbolKey = securityKey(trade);
     const existing =
       symbolMap.get(symbolKey) ??
       ({
         broker: trade.broker,
+        brokers: [trade.broker],
+        market: trade.market,
         currency: trade.currency,
-        symbol: trade.symbol,
+        symbol: displaySecuritySymbol(trade.symbol),
         securityName: trade.securityName,
         quantity: 0,
         proceeds: 0,
@@ -666,6 +861,14 @@ export function analyzeTaxInput(
         status: "flat",
       } satisfies SymbolSummary);
 
+    if (!existing.brokers.includes(trade.broker)) {
+      existing.brokers.push(trade.broker);
+      existing.broker = existing.brokers.join(" / ");
+    }
+    if (!existing.market && trade.market) existing.market = trade.market;
+    if (!existing.securityName || existing.securityName === existing.symbol) {
+      existing.securityName = trade.securityName;
+    }
     existing.quantity += trade.quantity;
     existing.proceeds += trade.proceeds;
     existing.costBasis += trade.costBasis;
@@ -821,29 +1024,37 @@ export function analyzeTaxScenarioInput(
   costCorrections: CostBasisCorrection[] = [],
 ): TaxAnalysis {
   const [window] = taxWindows(targetYear);
-  const scenario = replayScenario(input, window, costBasisMethod, config);
+  const correctedInput = applyActivityCostCorrections(input, costCorrections);
+  const scenario = replayScenario(correctedInput, window, costBasisMethod, config);
   const correctedTrades = applyCostCorrections(
-    [...scenario.trades, ...brokerReportedTradesInWindow(input, window)],
+    combineReplayAndBrokerReportedTrades(scenario.trades, brokerReportedTradesInWindow(correctedInput, window)),
     costCorrections,
   );
-  const dividends = input.dividends.filter((dividend) => inWindow(dividend.date, window));
+  const dividends = correctedInput.dividends.filter((dividend) => inWindow(dividend.date, window));
   const openPositions = enrichOpenPositionsWithEndingCosts(
-    input.openPositions.filter((position) => !position.asOf || position.asOf.startsWith(String(targetYear))),
+    correctedInput.openPositions.filter((position) => !position.asOf || position.asOf.startsWith(String(targetYear))),
     scenario.endingStates,
     costBasisMethod,
   );
+  const windowCostBasisRequests = correctedInput.costBasisRequests.filter((request) => inWindow(request.sellDate, window));
+  const costBasisRequests = filterResolvedCostBasisRequests(windowCostBasisRequests, correctedTrades);
+  const unresolvedCostBasisRequestIds = new Set(costBasisRequests.map((request) => request.id));
+  const resolvedCostBasisRequestIds = new Set(
+    windowCostBasisRequests.filter((request) => !unresolvedCostBasisRequestIds.has(request.id)).map((request) => request.id),
+  );
   const scopedInput: ParsedInput = {
-    ...input,
+    ...correctedInput,
     realizedTrades: correctedTrades,
     dividends,
     openPositions,
-    costBasisRequests: input.costBasisRequests.filter((request) => inWindow(request.sellDate, window)),
-    taxStatementSummaries: (input.taxStatementSummaries ?? []).filter((summary) => inSummaryPeriod(summary, window)),
+    issues: correctedInput.issues.filter((issue) => !resolvedCostBasisRequestIds.has(String(issue.id).replace(/-cost-gap$/, ""))),
+    costBasisRequests,
+    taxStatementSummaries: (correctedInput.taxStatementSummaries ?? []).filter((summary) => inSummaryPeriod(summary, window)),
   };
   const analysis = analyzeTaxInput(scopedInput, config);
   return {
     ...analysis,
-    taxScenarios: buildTaxScenarios(input, config, targetYear, costCorrections),
+    taxScenarios: buildTaxScenarios(correctedInput, config, targetYear, costCorrections),
   };
 }
 

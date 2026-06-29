@@ -7,7 +7,7 @@ import { taxConfigForYear } from "@/lib/tax/config";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
 import { parseIbkrPdfs } from "@/lib/parsers/ibkr";
-import { parseLongbridgePdfs, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
+import { parseLongbridgeFiles, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
 import { parsePandaPdfs } from "@/lib/parsers/panda";
 import { parseTigerPdfs } from "@/lib/parsers/tiger";
 import { parseUsmartPdfs } from "@/lib/parsers/usmart";
@@ -147,8 +147,8 @@ export async function analyzeUploadedFiles(options: {
       }
       futuFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "longbridge") {
-      if (!lower.endsWith(".pdf")) {
-        throw new ParserValidationError(`${file.name} 被标记为长桥，但长桥解析器只接受 PDF 月结单。`, file.name);
+      if (!lower.endsWith(".pdf") && !lower.endsWith(".xlsx") && !lower.endsWith(".xls")) {
+        throw new ParserValidationError(`${file.name} 被标记为长桥，但长桥解析器只接受 PDF 月结单或股票账户明细 Excel。`, file.name);
       }
       longbridgeFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "panda") {
@@ -189,10 +189,11 @@ export async function analyzeUploadedFiles(options: {
     inputs.push(parseFutuWorkbooks(futuFiles, options.manualCosts ?? [], options.taxYear));
   }
   if (longbridgeFiles.length > 0) {
-    if (!options.password?.trim()) {
+    const hasLongbridgePdf = longbridgeFiles.some((file) => /\.pdf$/i.test(file.name));
+    if (hasLongbridgePdf && !options.password?.trim()) {
       throw new ParserValidationError("检测到长桥 PDF 月结单，请先填写长桥 PDF 密码（手机号后四位 + 身份证后四位）后再解析。");
     }
-    const parsed = await parseLongbridgePdfs(longbridgeFiles, options.password, {
+    const parsed = await parseLongbridgeFiles(longbridgeFiles, options.password, {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
       securityAliases: options.securityAliases ?? [],

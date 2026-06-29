@@ -711,6 +711,7 @@ function buildMonthlyMissingCostData(
       symbol: item.symbol,
       securityName: item.securityName,
       quantity: item.quantity,
+      trackedQuantity: item.trackedQuantity,
       proceeds: item.proceeds,
       source: item.source,
       note: item.note,

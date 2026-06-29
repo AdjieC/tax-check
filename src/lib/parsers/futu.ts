@@ -69,6 +69,7 @@ interface MissingCostSale {
 }
 
 type FutuTradeKind = "buy" | "sell" | "short_open" | "short_close";
+type FutuTransferKind = "transfer_in" | "transfer_out";
 
 type FutuEvent =
   | {
@@ -84,6 +85,38 @@ type FutuEvent =
       cost: number;
       source: string;
       note: string;
+    }
+  | {
+      kind: "stock_split";
+      date: string;
+      time: string;
+      sequence: number;
+      market: string;
+      currency: Currency;
+      symbol: string;
+      securityName: string;
+      quantity: number;
+      splitRatio: number;
+      splitFromQuantity: number;
+      splitToQuantity: number;
+      cashInLieu?: number;
+      source: string;
+      note: string;
+    }
+  | {
+      kind: FutuTransferKind;
+      date: string;
+      time: string;
+      sequence: number;
+      market: string;
+      currency: Currency;
+      symbol: string;
+      securityName: string;
+      quantity: number;
+      amount: number;
+      source: string;
+      note: string;
+      excludedFromTaxReplay: boolean;
     }
   | {
       kind: FutuTradeKind;
@@ -119,10 +152,12 @@ const KNOWN_SECURITY_NAMES: Record<string, string> = {
   "02050": "三花智控 / SANHUA",
   "02590": "极智嘉-W / GEEKPLUS-W",
   "03288": "海天味业 / HAITIAN FLAV",
+  "03690": "美团-W",
   "06082": "颖通控股",
   "06613": "蓝思科技 / LENS",
   "09618": "京东集团-SW / JD-SW",
   "09988": "阿里巴巴-W / BABA-W",
+  BILI: "哔哩哔哩",
   DIDI: "滴滴 / DIDI",
 };
 
@@ -216,6 +251,27 @@ function includesDividendTaxMarker(note: string) {
   );
 }
 
+function includesStockSplitMarker(note: string) {
+  const upper = note.toUpperCase();
+  return upper.includes("SPLIT") || note.includes("拆股") || note.includes("合股");
+}
+
+function parseSplitRatioFromNote(note: string) {
+  const match = note.match(/(?:REVERSE\s+)?SPLIT\s+([0-9]+(?:\.[0-9]+)?)\s*(?:FOR|For|for)\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (!match) return null;
+  const to = Number(match[1]);
+  const from = Number(match[2]);
+  if (!Number.isFinite(to) || !Number.isFinite(from) || from <= 0 || to <= 0) return null;
+  return to / from;
+}
+
+function parseSplitSymbolFromCashNote(note: string) {
+  const match = note.match(/^([A-Z][A-Z0-9.-]{0,9})\s+(?:REVERSE\s+)?SPLIT\b/i);
+  if (match) return normalizeSymbol(match[1]);
+  const security = parseSecurityFromNote(note);
+  return security.symbol === "UNKNOWN" ? null : security.symbol;
+}
+
 function parseSecurityFromNote(note: string) {
   const sehk = note.match(/<(?:SEHK|HKEX|HKFX)\s+0?(\d{3,5})\s+([^>]+)>/i);
   if (sehk) {
@@ -305,6 +361,8 @@ function availableYears(
 }
 
 function activityAmount(event: FutuEvent) {
+  if (event.kind === "stock_split") return 0;
+  if (event.kind === "transfer_in" || event.kind === "transfer_out") return event.amount;
   if ("cash" in event) return event.kind === "buy" || event.kind === "short_close" ? -event.cash : event.cash;
   return event.cost;
 }
@@ -326,8 +384,13 @@ function buildTradeActivities(events: FutuEvent[]): TradeActivity[] {
     grossAmount: "grossAmount" in event ? event.grossAmount : undefined,
     fee: "fee" in event ? event.fee : undefined,
     amount: activityAmount(event),
+    splitRatio: "splitRatio" in event ? event.splitRatio : undefined,
+    splitFromQuantity: "splitFromQuantity" in event ? event.splitFromQuantity : undefined,
+    splitToQuantity: "splitToQuantity" in event ? event.splitToQuantity : undefined,
+    cashInLieu: "cashInLieu" in event ? event.cashInLieu : undefined,
     source: event.source,
     note: event.note,
+    excludedFromTaxReplay: "excludedFromTaxReplay" in event ? event.excludedFromTaxReplay : undefined,
   }));
 }
 
@@ -425,9 +488,102 @@ function buildIpoCostMap(contexts: WorkbookContext[]) {
   return ipoCostMap;
 }
 
+interface SplitCashInLieu {
+  date: string;
+  amount: number;
+  source: string;
+  note: string;
+  used: boolean;
+}
+
+interface StockSplitMoveGroup {
+  date: string;
+  account: string;
+  market: string;
+  currency: Currency;
+  symbol: string;
+  securityName: string;
+  note: string;
+  source: string;
+  splitFromQuantity: number;
+  splitToQuantity: number;
+}
+
+function splitCashKey(account: string, currency: Currency, symbol: string) {
+  return `${account}::${currency}::${symbol}`;
+}
+
+function dayIndex(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  if (![year, month, day].every((value) => Number.isFinite(value))) return null;
+  return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000);
+}
+
+function daysBetween(start: string, end: string) {
+  const startDay = dayIndex(start);
+  const endDay = dayIndex(end);
+  if (startDay === null || endDay === null) return null;
+  return endDay - startDay;
+}
+
+function parseSplitCashInLieu(contexts: WorkbookContext[]) {
+  const cashBySecurity = new Map<string, SplitCashInLieu[]>();
+
+  for (const context of contexts) {
+    const rows = readRows(context.workbook, "证券-资金进出");
+    const headers = rows[0] ?? [];
+    for (const [index, values] of rows.slice(1).entries()) {
+      const row = rowObject(headers, values);
+      const direction = String(row["方向"] ?? "");
+      const note = String(row["备注"] ?? "");
+      const amount = asNumber(row["变动金额"]);
+      if (direction !== "In" || amount <= 0 || !includesStockSplitMarker(note)) continue;
+
+      const symbol = parseSplitSymbolFromCashNote(note);
+      if (!symbol) continue;
+      const account = String(row["账户号码"] ?? "");
+      const currency = asCurrency(row["币种"]);
+      const key = splitCashKey(account, currency, symbol);
+      const items = cashBySecurity.get(key) ?? [];
+      items.push({
+        date: normalizeFutuDate(row["日期"]),
+        amount,
+        source: sourceId(context.fileName, index + 2),
+        note,
+        used: false,
+      });
+      cashBySecurity.set(key, items);
+    }
+  }
+
+  for (const items of cashBySecurity.values()) {
+    items.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  return cashBySecurity;
+}
+
+function takeSplitCashInLieu(
+  cashBySecurity: Map<string, SplitCashInLieu[]>,
+  account: string,
+  currency: Currency,
+  symbol: string,
+  splitDate: string,
+) {
+  const items = cashBySecurity.get(splitCashKey(account, currency, symbol)) ?? [];
+  const item = items.find((candidate) => {
+    if (candidate.used || candidate.date < splitDate) return false;
+    const gap = daysBetween(splitDate, candidate.date);
+    return gap === null || gap <= 45;
+  });
+  if (item) item.used = true;
+  return item;
+}
+
 function parseFutuEvents(contexts: WorkbookContext[]) {
   const events: FutuEvent[] = [];
   const ipoCostMap = buildIpoCostMap(contexts);
+  const splitCashInLieu = parseSplitCashInLieu(contexts);
   let sequence = 0;
 
   for (const context of contexts) {
@@ -471,15 +627,70 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
 
     const moveRows = readRows(context.workbook, "证券-资产进出");
     const moveHeaders = moveRows[0] ?? [];
+    const splitGroups = new Map<string, StockSplitMoveGroup>();
+
     for (const [index, values] of moveRows.slice(1).entries()) {
       const row = rowObject(moveHeaders, values);
       const type = String(row["类型"] ?? "");
       const direction = String(row["方向"] ?? "");
-      if (direction !== "In" || !type.includes("IPO")) continue;
+      const note = String(row["备注"] ?? "");
       const symbol = normalizeSymbol(row["代码名称"]);
       const currency = asCurrency(row["币种"]);
       const account = String(row["账户号码"] ?? "");
       const quantity = asNumber(row["数量"]);
+      const absoluteQuantity = Math.abs(quantity);
+
+      if (includesStockSplitMarker(note) && symbol && quantity !== 0) {
+        const date = normalizeFutuDate(row["日期"]);
+        const groupKey = `${account}::${currency}::${symbol}::${date}::${note.toUpperCase()}`;
+        const group =
+          splitGroups.get(groupKey) ??
+          ({
+            date,
+            account,
+            market: marketName(row["交易所/市场"]),
+            currency,
+            symbol,
+            securityName: securityName(symbol),
+            note,
+            source: sourceId(context.fileName, index + 2),
+            splitFromQuantity: 0,
+            splitToQuantity: 0,
+          } satisfies StockSplitMoveGroup);
+        if (direction === "Out" || quantity < 0) group.splitFromQuantity += Math.abs(quantity);
+        if (direction === "In" || quantity > 0) group.splitToQuantity += Math.abs(quantity);
+        splitGroups.set(groupKey, group);
+      }
+
+      if (
+        symbol &&
+        absoluteQuantity > 0 &&
+        !includesStockSplitMarker(note) &&
+        !type.includes("IPO") &&
+        (direction === "In" || direction === "Out" || quantity !== 0)
+      ) {
+        const side: FutuTransferKind = direction === "Out" || quantity < 0 ? "transfer_out" : "transfer_in";
+        const typeLabel = type || "资产进出";
+        const noteText = note || direction || typeLabel;
+        events.push({
+          kind: side,
+          date: normalizeFutuDate(row["日期"]),
+          time: "00:00:00",
+          sequence,
+          market: marketName(row["交易所/市场"]),
+          currency,
+          symbol,
+          securityName: securityName(symbol),
+          quantity: absoluteQuantity,
+          amount: 0,
+          source: sourceId(context.fileName, index + 2),
+          note: `${typeLabel}；${noteText}；富途年度报表未提供原始成本，已排除自动成本重放`,
+          excludedFromTaxReplay: true,
+        });
+        sequence += 1;
+      }
+
+      if (direction !== "In" || !type.includes("IPO")) continue;
       const cost = ipoCostMap.get(`${account}::${currency}::${symbol}`) ?? 0;
       if (!symbol || quantity <= 0) continue;
       events.push({
@@ -495,6 +706,39 @@ function parseFutuEvents(contexts: WorkbookContext[]) {
         cost,
         source: sourceId(context.fileName, index + 2),
         note: "IPO中签",
+      });
+      sequence += 1;
+    }
+
+    for (const group of splitGroups.values()) {
+      if (group.splitFromQuantity <= 0 || group.splitToQuantity <= 0) continue;
+      const splitRatio = parseSplitRatioFromNote(group.note) ?? group.splitToQuantity / group.splitFromQuantity;
+      if (!Number.isFinite(splitRatio) || splitRatio <= 0) continue;
+      const cashInLieu = takeSplitCashInLieu(
+        splitCashInLieu,
+        group.account,
+        group.currency,
+        group.symbol,
+        group.date,
+      );
+      events.push({
+        kind: "stock_split",
+        date: group.date,
+        time: "00:00:00",
+        sequence,
+        market: group.market,
+        currency: group.currency,
+        symbol: group.symbol,
+        securityName: group.securityName,
+        quantity: group.splitToQuantity,
+        splitRatio,
+        splitFromQuantity: group.splitFromQuantity,
+        splitToQuantity: group.splitToQuantity,
+        cashInLieu: cashInLieu?.amount,
+        source: cashInLieu ? `${group.source}; ${cashInLieu.source}` : group.source,
+        note: cashInLieu
+          ? `${group.note}；碎股现金 ${group.currency} ${cashInLieu.amount}`
+          : group.note,
       });
       sequence += 1;
     }
@@ -532,7 +776,45 @@ function buildRealizedTrades(
     state.currency = event.currency || state.currency;
     state.name = event.securityName || state.name;
 
-    if (event.kind === "acquire") {
+    if (event.kind === "stock_split") {
+      const splitRatio =
+        event.splitRatio || (event.splitFromQuantity > 0 ? event.splitToQuantity / event.splitFromQuantity : 0);
+      if (Number.isFinite(splitRatio) && splitRatio > 0) {
+        state.quantity *= splitRatio;
+        const fractionalQuantity = Math.max(0, state.quantity - event.splitToQuantity);
+        const cashInLieu = event.cashInLieu ?? 0;
+        if (fractionalQuantity > 1e-8 && cashInLieu > 0 && state.quantity + 1e-7 >= fractionalQuantity) {
+          const costBasis = fractionalQuantity * stateAvgCost(state);
+          if (event.date.startsWith(String(targetYear))) {
+            trades.push({
+              id: `futu-${event.date}-${event.currency}-${event.symbol}-stock-split-cash-in-lieu`,
+              broker: "富途",
+              sellDate: event.date,
+              time: event.time,
+              sequence: event.sequence,
+              market: event.market,
+              currency: event.currency,
+              symbol: event.symbol,
+              securityName: event.securityName,
+              quantity: fractionalQuantity,
+              proceeds: cashInLieu,
+              costBasis,
+              gainLoss: cashInLieu - costBasis,
+              source: event.source,
+              note: `${event.note}；拆合股碎股现金结算。`,
+            });
+          }
+          state.quantity -= fractionalQuantity;
+          state.costBasis -= costBasis;
+        }
+        if (Math.abs(state.quantity - event.splitToQuantity) <= 1e-6) {
+          state.quantity = event.splitToQuantity;
+        }
+      }
+    } else if (event.kind === "transfer_in" || event.kind === "transfer_out") {
+      states.set(key, state);
+      continue;
+    } else if (event.kind === "acquire") {
       state.quantity += event.quantity;
       state.costBasis += event.cost;
     } else if (event.kind === "buy") {
@@ -703,6 +985,7 @@ function buildRealizedTrades(
       symbol: item.symbol,
       securityName: item.securityName,
       quantity: item.quantity,
+      trackedQuantity: item.trackedQuantity,
       proceeds: item.proceeds,
       source: item.source,
       note: item.note,
@@ -835,6 +1118,16 @@ function inferOpenPositionsFromEvents(events: FutuEvent[], targetYear: number, e
     } else if (event.kind === "buy" || event.kind === "acquire") {
       state.quantity += event.quantity;
       if ("unitPrice" in event) state.lastPrice = event.unitPrice || state.lastPrice;
+    } else if (event.kind === "stock_split") {
+      const splitRatio =
+        event.splitRatio || (event.splitFromQuantity > 0 ? event.splitToQuantity / event.splitFromQuantity : 0);
+      if (Number.isFinite(splitRatio) && splitRatio > 0) {
+        state.quantity *= splitRatio;
+        if (state.lastPrice > 0) state.lastPrice /= splitRatio;
+        if (Number.isFinite(event.splitToQuantity) && event.splitToQuantity > 0) {
+          state.quantity = event.splitToQuantity;
+        }
+      }
     } else if ("unitPrice" in event) {
       state.lastPrice = event.unitPrice || state.lastPrice;
     }

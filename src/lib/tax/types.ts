@@ -143,6 +143,7 @@ export interface CostBasisRequest {
   symbol: string;
   securityName: string;
   quantity: number;
+  trackedQuantity?: number;
   proceeds: number;
   source: string;
   note?: string;
@@ -165,6 +166,8 @@ export interface ParsedInput {
 
 export interface SymbolSummary {
   broker: string;
+  brokers: string[];
+  market: string;
   currency: Currency;
   symbol: string;
   securityName: string;

@@ -75,6 +75,23 @@ function fmtPrice(n) {
   });
 }
 
+function fmtQuantity(n) {
+  return Math.abs(n).toLocaleString("en-US", {
+    maximumFractionDigits: 8,
+  });
+}
+
+function costBasisRequestGap(request) {
+  const quantity = Number(request?.quantity);
+  const trackedQuantity = Number(request?.trackedQuantity);
+  if (!Number.isFinite(quantity) || !Number.isFinite(trackedQuantity)) return null;
+  const tracked = Math.min(Math.max(trackedQuantity, 0), quantity);
+  return {
+    tracked,
+    missing: Math.max(0, quantity - tracked),
+  };
+}
+
 function signed(n, digits = 2) {
   return `${n >= 0 ? "+" : "-"}${fmt(n, digits)}`;
 }
@@ -221,6 +238,43 @@ function displayRowCode(code) {
   return isUnresolvedSymbol(code) ? "待补代码" : code;
 }
 
+function normalizeSearchText(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function searchNeedles(value) {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) return [];
+  const needles = [normalized];
+  if (/^\d+$/.test(normalized)) {
+    needles.push(normalized.padStart(5, "0"), normalized.replace(/^0+/, "") || "0");
+  }
+  return Array.from(new Set(needles));
+}
+
+function searchHaystack(...values) {
+  const parts = [];
+  for (const value of values) {
+    const normalized = normalizeSearchText(value);
+    if (!normalized) continue;
+    parts.push(normalized);
+    if (/^\d+$/.test(normalized)) {
+      parts.push(normalized.padStart(5, "0"), normalized.replace(/^0+/, "") || "0");
+    }
+  }
+  return Array.from(new Set(parts)).join(" ");
+}
+
+function matchesSearchQuery(haystack, query) {
+  const needles = searchNeedles(query);
+  if (needles.length === 0) return true;
+  return needles.some((needle) => haystack.includes(needle));
+}
+
 function transactionDate(txn) {
   return String(txn.sellDate ?? txn.date ?? "");
 }
@@ -235,15 +289,23 @@ function compareTransactionRows(a, b) {
 }
 
 function rowSymbolKey(row) {
-  return `${row.broker ?? ""}::${row.currency ?? ""}::${row.code ?? ""}`;
+  return `${row.currency ?? ""}::${symbolForSecurityMatch(row.code) || normalizeSecuritySymbolInput(row.code)}`;
 }
 
 function uniqueSymbolCount(rows) {
   return new Set((rows ?? []).map(rowSymbolKey)).size;
 }
 
+function rowHasRmbPnl(row) {
+  return Number.isFinite(row?.rmb);
+}
+
+function rowNeedsCost(row) {
+  return Boolean(row?.missingCost || (row?.positionOnly && !rowHasRmbPnl(row)));
+}
+
 function securityAliasStateKey(row) {
-  return `${row.broker}::${row.currency}::${row.name}`;
+  return `${row.currency}::${row.name}`;
 }
 
 function normalizeSecuritySymbolInput(value) {
@@ -252,6 +314,55 @@ function normalizeSecuritySymbolInput(value) {
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "");
+}
+
+function symbolForSecurityMatch(value) {
+  const symbol = normalizeSecuritySymbolInput(isUnresolvedSymbol(value) ? "" : value);
+  if (!symbol) return "";
+  return /^\d+$/.test(symbol) ? symbol.padStart(5, "0") : symbol;
+}
+
+function securityNameForMatch(value) {
+  return normalizeSearchText(value);
+}
+
+function hasSameSecurityCode(left, right) {
+  const leftSymbol = symbolForSecurityMatch(left);
+  const rightSymbol = symbolForSecurityMatch(right);
+  return Boolean(leftSymbol && rightSymbol && leftSymbol === rightSymbol);
+}
+
+function hasSameSecurityName(left, right) {
+  const leftName = securityNameForMatch(left);
+  const rightName = securityNameForMatch(right);
+  if (!leftName || !rightName) return false;
+  return leftName === rightName || (leftName.length >= 2 && rightName.length >= 2 && (leftName.includes(rightName) || rightName.includes(leftName)));
+}
+
+function rowBrokerList(row) {
+  if (Array.isArray(row?.brokers) && row.brokers.length > 0) return row.brokers;
+  const broker = String(row?.broker ?? "").trim();
+  return broker ? broker.split(/\s*(?:\/|、)\s*/).filter(Boolean) : [];
+}
+
+function brokerSummaryLabel(brokers) {
+  const unique = Array.from(new Set((brokers ?? []).filter(Boolean)));
+  return unique.join(" / ");
+}
+
+function mergeBroker(row, broker) {
+  if (!broker) return;
+  row.brokers = Array.isArray(row.brokers) ? row.brokers : [];
+  if (!row.brokers.includes(broker)) row.brokers.push(broker);
+  row.broker = brokerSummaryLabel(row.brokers);
+}
+
+function securityItemMatchesRow(item, row) {
+  if (!item || !row) return false;
+  const brokers = rowBrokerList(row);
+  if (item.broker && brokers.length > 0 && !brokers.includes(item.broker)) return false;
+  if (item.currency && row.currency && item.currency !== row.currency) return false;
+  return hasSameSecurityCode(item.symbol ?? item.code, row.code) || hasSameSecurityName(item.securityName ?? item.name, row.name);
 }
 
 function securityAliasInputsFromState(securityAliases) {
@@ -267,14 +378,22 @@ function securityAliasInputsFromState(securityAliases) {
 
 function rowsFromAnalysis(analysis) {
   if (!analysis) return [];
-  const rows = analysis.symbols.map((symbol) => {
+  const rowMap = new Map();
+  const rowKeyFor = (currency, symbol) => `${currency}::${symbolForSecurityMatch(symbol) || normalizeSecuritySymbolInput(symbol)}`;
+
+  for (const symbol of analysis.symbols) {
     const market = currencyToMarket(symbol.currency, symbol.market);
     const trades = analysis.realizedTrades.filter(
-      (trade) => trade.broker === symbol.broker && trade.currency === symbol.currency && trade.symbol === symbol.symbol,
+      (trade) => trade.currency === symbol.currency && hasSameSecurityCode(trade.symbol, symbol.symbol),
     );
-    return {
-      key: `${symbol.broker}::${symbol.currency}::${symbol.symbol}`,
-      broker: symbol.broker,
+    const brokers = symbol.brokers?.length
+      ? symbol.brokers
+      : Array.from(new Set(trades.map((trade) => trade.broker).filter(Boolean)));
+    const key = rowKeyFor(symbol.currency, symbol.symbol);
+    rowMap.set(key, {
+      key,
+      broker: brokerSummaryLabel(brokers) || symbol.broker,
+      brokers,
       market,
       code: symbol.symbol,
       name: symbol.securityName,
@@ -285,55 +404,82 @@ function rowsFromAnalysis(analysis) {
       pnlOriginal: symbol.gainLoss,
       rmb: symbol.gainLossRmb,
       transactions: trades,
-    };
-  });
-  const missingRows = (analysis.costBasisRequests ?? [])
-    .map((request) => {
-      const key = `${request.broker}::${request.currency}::${request.symbol}::missing::${request.id}`;
-      const market = currencyToMarket(request.currency, request.market);
-      return {
+      missingCost: false,
+      missingCostRequests: [],
+    });
+  }
+
+  for (const request of analysis.costBasisRequests ?? []) {
+    const key = rowKeyFor(request.currency, request.symbol);
+    const existing =
+      rowMap.get(key) ??
+      {
         key,
         broker: request.broker,
-        market,
+        brokers: [],
+        market: currencyToMarket(request.currency, request.market),
         code: request.symbol,
         name: request.securityName,
         currency: request.currency,
-        quantity: request.quantity,
-        proceeds: request.proceeds,
+        quantity: 0,
+        proceeds: 0,
         costBasis: null,
         pnlOriginal: null,
         rmb: null,
-        missingCost: true,
-        missingCostRequest: request,
         transactions: [],
       };
-    })
-    .filter(Boolean)
-    .sort((a, b) => compareTransactionRows(a.missingCostRequest, b.missingCostRequest));
-  const positionRows = (analysis.openPositions ?? [])
-    .map((position) => {
-      const baseKey = `${position.broker}::${position.currency}::${position.symbol}`;
-      const market = currencyToMarket(position.currency, position.market);
-      const unrealized = Number.isFinite(position.unrealizedGainLoss) ? position.unrealizedGainLoss : null;
-      return {
+
+    mergeBroker(existing, request.broker);
+    if (!existing.market) existing.market = currencyToMarket(request.currency, request.market);
+    if (!existing.name || existing.name === existing.code) existing.name = request.securityName;
+    existing.quantity += request.quantity;
+    existing.proceeds += request.proceeds;
+    existing.missingCost = true;
+    existing.missingCostRequests = [...(existing.missingCostRequests ?? []), request].sort(compareTransactionRows);
+    existing.missingCostRequest = existing.missingCostRequests[0];
+    rowMap.set(key, existing);
+  }
+
+  const positionMap = new Map();
+  for (const position of analysis.openPositions ?? []) {
+    const baseKey = rowKeyFor(position.currency, position.symbol);
+    const existing =
+      positionMap.get(baseKey) ??
+      {
         key: `${baseKey}::position`,
         broker: position.broker,
-        market,
+        brokers: [],
+        market: currencyToMarket(position.currency, position.market),
         code: position.symbol,
         name: position.securityName,
         currency: position.currency,
-        quantity: position.quantity,
-        proceeds: position.marketValue,
-        costBasis: position.costBasis ?? null,
-        pnlOriginal: unrealized,
-        rmb: unrealized === null ? null : unrealized * (analysis.config.fxRates[position.currency] ?? 1),
+        quantity: 0,
+        proceeds: 0,
+        costBasis: 0,
+        pnlOriginal: 0,
+        rmb: 0,
         positionOnly: true,
-        position,
+        positions: [],
         transactions: [],
       };
-    })
-    .filter(Boolean);
-  return [...missingRows, ...rows, ...positionRows];
+
+    mergeBroker(existing, position.broker);
+    if (!existing.name || existing.name === existing.code) existing.name = position.securityName;
+    if (!existing.market) existing.market = currencyToMarket(position.currency, position.market);
+    existing.quantity += position.quantity;
+    existing.proceeds += position.marketValue;
+
+    const hasCostBasis = Number.isFinite(position.costBasis);
+    existing.costBasis = existing.costBasis === null || !hasCostBasis ? null : existing.costBasis + position.costBasis;
+
+    const unrealized = Number.isFinite(position.unrealizedGainLoss) ? position.unrealizedGainLoss : null;
+    existing.pnlOriginal = existing.pnlOriginal === null || unrealized === null ? null : existing.pnlOriginal + unrealized;
+    existing.rmb = existing.pnlOriginal === null ? null : existing.pnlOriginal * (analysis.config.fxRates[position.currency] ?? 1);
+    existing.positions.push(position);
+    positionMap.set(baseKey, existing);
+  }
+  const positionRows = Array.from(positionMap.values()).filter(Boolean);
+  return [...Array.from(rowMap.values()), ...positionRows];
 }
 
 function dividendsFromAnalysis(analysis) {
@@ -372,29 +518,426 @@ function activitySideFilterValue(activity) {
   return "other";
 }
 
-function compareFlowBase(a, b) {
+const FLOW_REPLAY_EPSILON = 1e-8;
+
+function flowReplayRank(side) {
+  const rank = {
+    acquire: 1,
+    transfer_in: 1,
+    stock_split: 1.5,
+    buy: 2,
+    short_open: 2,
+    short_close: 2,
+    sell: 2,
+    transfer_out: 3,
+  };
+  return rank[side] ?? 2;
+}
+
+function compareFlowActivitiesForReplay(a, b) {
   return (
-    a.market.localeCompare(b.market) ||
-    a.code.localeCompare(b.code) ||
+    a.activity.date.localeCompare(b.activity.date) ||
+    flowReplayRank(a.activity.side) - flowReplayRank(b.activity.side) ||
+    String(a.activity.time ?? "99:99:99").localeCompare(String(b.activity.time ?? "99:99:99")) ||
+    (a.activity.sequence ?? 0) - (b.activity.sequence ?? 0) ||
+    a.snapshotId.localeCompare(b.snapshotId)
+  );
+}
+
+function flowSnapshotId(activity, index) {
+  return `${activity.id ?? "activity"}::${index}`;
+}
+
+function flowPositionKey(activity) {
+  return `${activity.currency ?? ""}::${activity.symbol ?? ""}`;
+}
+
+function flowTradeMatchQuantity(value) {
+  const quantity = Number(value);
+  return Number.isFinite(quantity) ? Math.abs(quantity).toFixed(8) : "0.00000000";
+}
+
+function flowRealizedTradeSignature({ broker, date, sellDate, time, sequence, currency, symbol, quantity }) {
+  return [
+    broker ?? "",
+    sellDate ?? date ?? "",
+    time ?? "",
+    sequence ?? "",
+    currency ?? "",
+    symbol ?? "",
+    flowTradeMatchQuantity(quantity),
+  ].join("::");
+}
+
+function isFlowTradeRealizedSide(side) {
+  return side === "sell" || side === "short_close";
+}
+
+function isFlowCostCorrectableSide(side) {
+  return side === "transfer_in" || side === "acquire";
+}
+
+function flowCostCorrectionKey(activity) {
+  return isFlowCostCorrectableSide(activity.side) ? activity.id : null;
+}
+
+function cleanFlowQuantity(value) {
+  return Math.abs(value) < FLOW_REPLAY_EPSILON ? 0 : value;
+}
+
+function flowActivityQuantity(activity) {
+  const quantity = Number(activity.quantity);
+  return Number.isFinite(quantity) ? Math.abs(quantity) : 0;
+}
+
+function flowActivityCostAmount(activity) {
+  const amount = Number(activity.amount);
+  if (Number.isFinite(amount) && Math.abs(amount) > FLOW_REPLAY_EPSILON) return Math.abs(amount);
+  const grossAmount = Number(activity.grossAmount);
+  if (Number.isFinite(grossAmount) && Math.abs(grossAmount) > FLOW_REPLAY_EPSILON) return Math.abs(grossAmount);
+  const unitPrice = Number(activity.unitPrice);
+  const quantity = flowActivityQuantity(activity);
+  if (Number.isFinite(unitPrice) && Math.abs(unitPrice) > FLOW_REPLAY_EPSILON && quantity > FLOW_REPLAY_EPSILON) {
+    return Math.abs(unitPrice * quantity);
+  }
+  return 0;
+}
+
+function newFlowPositionState() {
+  return {
+    quantity: 0,
+    costBasis: 0,
+    longCostKnown: true,
+    shortQuantity: 0,
+    shortProceeds: 0,
+    shortCostKnown: true,
+  };
+}
+
+function resetLongFlowPosition(state) {
+  state.quantity = 0;
+  state.costBasis = 0;
+  state.longCostKnown = true;
+}
+
+function resetShortFlowPosition(state) {
+  state.shortQuantity = 0;
+  state.shortProceeds = 0;
+  state.shortCostKnown = true;
+}
+
+function addLongFlowPosition(state, quantity, costAmount) {
+  if (quantity <= FLOW_REPLAY_EPSILON) return;
+  state.quantity += quantity;
+  state.costBasis += costAmount;
+  if (costAmount <= FLOW_REPLAY_EPSILON) state.longCostKnown = false;
+}
+
+function consumeLongFlowPosition(state, quantity) {
+  if (quantity <= FLOW_REPLAY_EPSILON) return;
+  if (state.quantity + FLOW_REPLAY_EPSILON < quantity) {
+    resetLongFlowPosition(state);
+    return null;
+  }
+  const costKnown = state.longCostKnown;
+  const costBasis = state.quantity > FLOW_REPLAY_EPSILON ? (state.costBasis * quantity) / state.quantity : 0;
+  state.quantity -= quantity;
+  state.costBasis -= costBasis;
+  if (state.quantity <= FLOW_REPLAY_EPSILON) resetLongFlowPosition(state);
+  return costKnown ? costBasis : null;
+}
+
+function addShortFlowPosition(state, quantity, proceeds) {
+  if (quantity <= FLOW_REPLAY_EPSILON) return;
+  state.shortQuantity += quantity;
+  state.shortProceeds += proceeds;
+  if (proceeds <= FLOW_REPLAY_EPSILON) state.shortCostKnown = false;
+}
+
+function consumeShortFlowPosition(state, quantity) {
+  if (quantity <= FLOW_REPLAY_EPSILON) return;
+  if (state.shortQuantity + FLOW_REPLAY_EPSILON < quantity) {
+    resetShortFlowPosition(state);
+    return null;
+  }
+  const costKnown = state.shortCostKnown;
+  const proceeds = state.shortQuantity > FLOW_REPLAY_EPSILON ? (state.shortProceeds * quantity) / state.shortQuantity : 0;
+  state.shortQuantity -= quantity;
+  state.shortProceeds -= proceeds;
+  if (state.shortQuantity <= FLOW_REPLAY_EPSILON) resetShortFlowPosition(state);
+  return costKnown ? proceeds : null;
+}
+
+function applyFlowStockSplit(state, activity) {
+  const splitFromQuantity = Number(activity.splitFromQuantity);
+  const splitToQuantity = Number(activity.splitToQuantity);
+  const inferredRatio =
+    Number.isFinite(splitFromQuantity) && splitFromQuantity > FLOW_REPLAY_EPSILON && Number.isFinite(splitToQuantity)
+      ? splitToQuantity / splitFromQuantity
+      : null;
+  const ratio = Number(activity.splitRatio ?? inferredRatio);
+  if (!Number.isFinite(ratio) || ratio <= FLOW_REPLAY_EPSILON) return;
+  state.quantity *= ratio;
+  state.shortQuantity *= ratio;
+  if (Number.isFinite(splitToQuantity) && Math.abs(state.quantity - splitToQuantity) <= 1e-6) {
+    state.quantity = splitToQuantity;
+  }
+}
+
+function averageCostFromFlowState(state) {
+  if (state.quantity > FLOW_REPLAY_EPSILON) {
+    return state.longCostKnown ? state.costBasis / state.quantity : null;
+  }
+  if (state.shortQuantity > FLOW_REPLAY_EPSILON) {
+    return state.shortCostKnown ? state.shortProceeds / state.shortQuantity : null;
+  }
+  return null;
+}
+
+function snapshotFromFlowState(state, activityGainLoss = null) {
+  return {
+    currentQuantity: cleanFlowQuantity(state.quantity - state.shortQuantity),
+    currentAverageCost: averageCostFromFlowState(state),
+    activityGainLoss,
+  };
+}
+
+function buildFlowPositionSnapshots(activities = []) {
+  const states = new Map();
+  const snapshots = new Map();
+  const entries = activities
+    .map((activity, index) => ({ activity, snapshotId: flowSnapshotId(activity, index) }))
+    .sort(compareFlowActivitiesForReplay);
+
+  for (const { activity, snapshotId } of entries) {
+    const key = flowPositionKey(activity);
+    const state = states.get(key) ?? newFlowPositionState();
+    const quantity = flowActivityQuantity(activity);
+    const costAmount = flowActivityCostAmount(activity);
+    let activityGainLoss = null;
+
+    if (activity.side === "stock_split") {
+      applyFlowStockSplit(state, activity);
+    } else if (["buy", "acquire", "transfer_in"].includes(activity.side)) {
+      addLongFlowPosition(state, quantity, costAmount);
+    } else if (activity.side === "sell") {
+      const costBasis = consumeLongFlowPosition(state, quantity);
+      activityGainLoss = costBasis === null || costBasis === undefined ? null : costAmount - costBasis;
+    } else if (activity.side === "transfer_out") {
+      consumeLongFlowPosition(state, quantity);
+    } else if (activity.side === "short_open") {
+      addShortFlowPosition(state, quantity, costAmount);
+    } else if (activity.side === "short_close") {
+      const proceeds = consumeShortFlowPosition(state, quantity);
+      activityGainLoss = proceeds === null || proceeds === undefined ? null : proceeds - costAmount;
+    }
+
+    states.set(key, state);
+    snapshots.set(snapshotId, snapshotFromFlowState(state, activityGainLoss));
+  }
+
+  return snapshots;
+}
+
+function buildFlowRealizedTradeLookup(realizedTrades = []) {
+  const byActivityId = new Map();
+  const bySignature = new Map();
+  for (const trade of realizedTrades) {
+    byActivityId.set(trade.id, trade);
+    byActivityId.set(costCorrectionKeyForRealizedTradeId(trade.id), trade);
+    bySignature.set(flowRealizedTradeSignature(trade), trade);
+  }
+  return { byActivityId, bySignature };
+}
+
+function buildTradeFlowRows(activities = [], realizedTrades = [], costCorrections = {}) {
+  const flowSnapshots = buildFlowPositionSnapshots(activities);
+  const realizedTradeLookup = buildFlowRealizedTradeLookup(realizedTrades);
+  return (activities ?? []).map((activity, index) => {
+    const id = flowSnapshotId(activity, index);
+    const snapshot = flowSnapshots.get(id) ?? { currentQuantity: 0, currentAverageCost: null };
+    const realizedTrade =
+      realizedTradeLookup.byActivityId.get(activity.id) ??
+      realizedTradeLookup.bySignature.get(flowRealizedTradeSignature(activity));
+    const transferCorrectionKey = flowCostCorrectionKey(activity);
+    const correctedTransferCost = transferCorrectionKey ? parseManualCostValue(costCorrections[transferCorrectionKey]) : null;
+    const quantity = flowActivityQuantity(activity);
+    const displayAmount = correctedTransferCost ?? activity.grossAmount ?? flowActivityCostAmount(activity);
+    const unitPrice = Number(activity.unitPrice);
+    const displayPrice = Number.isFinite(unitPrice) ? unitPrice : quantity > FLOW_REPLAY_EPSILON ? displayAmount / quantity : 0;
+    return {
+      id,
+      activityId: activity.id,
+      broker: activity.broker,
+      date: activity.date,
+      time: activity.time,
+      sequence: activity.sequence,
+      market: currencyToMarket(activity.currency, activity.market),
+      code: activity.symbol,
+      symbol: activity.symbol,
+      name: activity.securityName,
+      securityName: activity.securityName,
+      currency: activity.currency,
+      source: activity.source,
+      note: activity.note,
+      side: activitySideLabel(activity),
+      sideFilter: activitySideFilterValue(activity),
+      rawSide: activity.side,
+      excludedFromTaxReplay: Boolean(activity.excludedFromTaxReplay),
+      qty: quantity,
+      price: displayPrice,
+      amount: displayAmount,
+      fee: activity.fee ?? 0,
+      currentQuantity: snapshot.currentQuantity,
+      currentAverageCost: snapshot.currentAverageCost,
+      tradeGainLoss: isFlowTradeRealizedSide(activity.side) ? realizedTrade?.gainLoss ?? snapshot.activityGainLoss : null,
+      realizedTrade,
+      transferCostCorrectionKey: transferCorrectionKey,
+      realizedCostCorrectionKey: realizedTrade ? costCorrectionKeyForRealizedTradeId(realizedTrade.id) : null,
+      costCorrectionKey: transferCorrectionKey,
+      query: searchHaystack(activity.symbol, displayRowCode(activity.symbol), activity.securityName),
+    };
+  });
+}
+
+function buildOpenPositionRows(openPositions = [], fx = FX) {
+  const enriched = (openPositions ?? []).map((item) => {
+    const market = currencyToMarket(item.currency, item.market);
+    const hasCostBasis = Number.isFinite(item.costBasis);
+    const hasUnrealized = Number.isFinite(item.unrealizedGainLoss);
+    const costBasis = hasCostBasis ? item.costBasis : hasUnrealized ? item.marketValue - item.unrealizedGainLoss : null;
+    const costStatus = hasCostBasis ? "reported" : hasUnrealized ? "derived" : "missing";
+    const last = item.quantity ? item.marketValue / item.quantity : 0;
+    const cost = item.quantity && costBasis !== null ? costBasis / item.quantity : null;
+    const unrealized = hasUnrealized ? item.unrealizedGainLoss : costBasis !== null ? item.marketValue - costBasis : null;
+    const rmb = unrealized === null ? null : unrealized * (fx[market] ?? 1);
+    const marketValue = item.marketValue * (fx[market] ?? 1);
+    return {
+      id: item.id,
+      broker: item.broker,
+      market,
+      code: item.symbol,
+      symbol: item.symbol,
+      name: item.securityName,
+      securityName: item.securityName,
+      currency: item.currency,
+      qty: item.quantity,
+      quantity: item.quantity,
+      cost,
+      costBasis,
+      costStatus,
+      last,
+      unrealized,
+      rmb,
+      marketValue,
+      source: item.source,
+      asOf: item.asOf,
+      note: item.note,
+    };
+  });
+  const totalMarketValue = enriched.reduce((sum, item) => sum + item.marketValue, 0);
+  return enriched.map((item) => ({ ...item, weight: totalMarketValue ? (item.marketValue / totalMarketValue) * 100 : 0 }));
+}
+
+function positionCostRecordStatus(position) {
+  if (position.costStatus === "missing") {
+    return {
+      label: "需补成本",
+      className: "warn",
+      detail: "这条期末持仓没有读取到成本或未实现盈亏，后续卖出前需要补原始买入/转仓成本。",
+    };
+  }
+  if (position.costStatus === "derived") {
+    return {
+      label: "成本倒推",
+      className: "review",
+      detail: "这条期末持仓成本由市值和未实现盈亏倒推，建议核对券商原始成本。",
+    };
+  }
+  return {
+    label: "成本待复核",
+    className: "review",
+    detail: "这条期末持仓已有券商成本基准，但未参与已实现盈亏计算，正式申报前仍建议复核来源。",
+  };
+}
+
+function positionCostRecordTitle(position) {
+  const status = positionCostRecordStatus(position);
+  const source = position.source ?? "期末持仓记录";
+  const asOf = position.asOf ? ` · ${position.asOf}` : "";
+  return `${status.label}：${source}${asOf}`;
+}
+
+function compareSortableText(a, b) {
+  return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function compareWithSortDirection(result, direction) {
+  return direction === "desc" ? -result : result;
+}
+
+function parseSortValue(value, defaultKey = "code") {
+  const [rawKey, rawDirection] = String(value ?? "").split("-");
+  const key = rawKey === "date" || rawKey === "code" ? rawKey : defaultKey;
+  return {
+    key,
+    direction: rawDirection === "desc" ? "desc" : "asc",
+  };
+}
+
+function sortValue(key, direction) {
+  return `${key}-${direction === "desc" ? "desc" : "asc"}`;
+}
+
+function nextSortValue(currentValue, key) {
+  const current = parseSortValue(currentValue, key);
+  return sortValue(key, current.key === key && current.direction === "asc" ? "desc" : "asc");
+}
+
+function sortDirectionLabel(direction) {
+  return direction === "desc" ? "降序" : "升序";
+}
+
+function compareFlowDateFields(a, b) {
+  return (
     a.date.localeCompare(b.date) ||
     String(a.time ?? "").localeCompare(String(b.time ?? "")) ||
-    (a.sequence ?? 0) - (b.sequence ?? 0) ||
-    a.id.localeCompare(b.id)
+    (a.sequence ?? 0) - (b.sequence ?? 0)
+  );
+}
+
+function compareFlowCodeFields(a, b) {
+  return (
+    a.market.localeCompare(b.market) ||
+    compareSortableText(a.code, b.code) ||
+    compareSortableText(a.name, b.name)
   );
 }
 
 function compareFlowsByCode(a, b) {
-  return compareFlowBase(a, b);
+  return compareFlowCodeFields(a, b) || compareFlowDateFields(a, b) || compareSortableText(a.id, b.id);
 }
 
 function compareFlowsByDate(a, b) {
+  return compareFlowDateFields(a, b) || compareFlowCodeFields(a, b) || compareSortableText(a.id, b.id);
+}
+
+function compareFlowsBySort(a, b, sort) {
+  const primary = sort.key === "date" ? compareFlowDateFields(a, b) : compareFlowCodeFields(a, b);
+  const secondary = sort.key === "date" ? compareFlowCodeFields(a, b) : compareFlowDateFields(a, b);
+  return compareWithSortDirection(primary, sort.direction) || secondary || compareSortableText(a.id, b.id);
+}
+
+function compareOpenPositionCodeFields(a, b) {
+  return a.market.localeCompare(b.market) || compareSortableText(a.code, b.code) || compareSortableText(a.name, b.name);
+}
+
+function compareOpenPositionsBySort(a, b, sort) {
   return (
-    a.date.localeCompare(b.date) ||
-    String(a.time ?? "").localeCompare(String(b.time ?? "")) ||
-    (a.sequence ?? 0) - (b.sequence ?? 0) ||
-    a.market.localeCompare(b.market) ||
-    a.code.localeCompare(b.code) ||
-    a.id.localeCompare(b.id)
+    compareWithSortDirection(compareOpenPositionCodeFields(a, b), sort.direction) ||
+    compareSortableText(a.broker, b.broker) ||
+    compareSortableText(a.currency, b.currency) ||
+    compareSortableText(a.source, b.source)
   );
 }
 
@@ -429,6 +972,39 @@ function transferRecordsFromActivities(activities) {
       };
     })
     .sort((a, b) => a.date.localeCompare(b.date) || a.code.localeCompare(b.code) || a.side.localeCompare(b.side));
+}
+
+function isCostCarryingInflow(flow) {
+  return flow?.rawSide === "transfer_in" || flow?.rawSide === "acquire";
+}
+
+function isTransferChainFlow(flow) {
+  return isCostCarryingInflow(flow) || flow?.rawSide === "transfer_out";
+}
+
+function flowHasMissingCostBasis(flow) {
+  if (!isCostCarryingInflow(flow)) return false;
+  if (flow.excludedFromTaxReplay) return true;
+  const amount = Number(flow.amount);
+  return !Number.isFinite(amount) || Math.abs(amount) <= FLOW_REPLAY_EPSILON;
+}
+
+function costGapTransferChainForPosition(position, flows = []) {
+  if (position?.costStatus !== "missing") return [];
+  const asOf = String(position.asOf ?? "9999-12-31");
+  const chain = flows.filter((flow) => isTransferChainFlow(flow) && String(flow.date ?? "") <= asOf).sort(compareFlowsByDate);
+  const firstMissingIndex = chain.findIndex(flowHasMissingCostBasis);
+  if (firstMissingIndex < 0) return [];
+  return chain.slice(Math.max(0, firstMissingIndex), firstMissingIndex + 6);
+}
+
+function costGapTransferExplanation(position, chain = []) {
+  const missingSource = chain.find(flowHasMissingCostBasis);
+  if (!missingSource) return "";
+  const asOf = position.asOf ? `截至 ${position.asOf}` : "截至期末";
+  return `${missingSource.date} ${missingSource.side} ${fmtQuantity(missingSource.qty)} 股没有成本金额，后续持仓链路延续到 ${asOf} 的 ${fmtQuantity(
+    position.qty,
+  )} 股，因此当前成本待补。`;
 }
 
 function coverageMonths(year, files, tradeActivities, dividends, realizedTrades, openPositions) {
@@ -665,6 +1241,7 @@ const LONGBRIDGE_TEXT_MARKERS = [
   "long bridge securities",
   "lbhk",
 ];
+const LONGBRIDGE_STOCK_LEDGER_HEADERS = ["编号", "业务时间", "账户类型", "业务分类", "股票代码", "账户流向", "数量", "总数量"];
 const TIGER_TEXT_MARKERS = ["Tiger Brokers", "Tiger Brokers (NZ)", "老虎", "活动报表", "Tax Form Record", "Key Tax Figures"];
 const PANDA_TEXT_MARKERS = ["熊猫证券", "熊貓證券", "Panda Securities", "fafa.hk"];
 const CMB_WING_LUNG_TEXT_MARKERS = ["招商永隆", "招商永隆銀行", "招商永隆银行", "CMB Wing Lung", "Annual Income Report", "全年收入報告", "全年收入报告"];
@@ -714,6 +1291,26 @@ function hasAnyMarker(text, markers) {
 function hasCmbWingLungMonthlyMarkers(text) {
   const normalized = String(text ?? "").normalize("NFKC");
   return normalized.includes("证券账户月结单") && normalized.includes("证券账户号码");
+}
+
+function hasLongbridgeStockLedgerSheet(workbook) {
+  return workbook.SheetNames.some((sheetName) => {
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: "",
+      raw: false,
+      blankrows: false,
+    });
+    const headers = new Set((rows[0] ?? []).map((header) => String(header ?? "").normalize("NFKC").trim()));
+    const hasHeaders = LONGBRIDGE_STOCK_LEDGER_HEADERS.every((header) => headers.has(header));
+    if (!hasHeaders) return false;
+    const preview = rows
+      .slice(1, 20)
+      .flat()
+      .map((cell) => String(cell ?? "").normalize("NFKC"))
+      .join(" ");
+    return /\[(?:LSTB|LSTS|LIPO|LPRE|SSTB|SSTS|LSTCAM|LSTIN)/.test(preview) || /(?:ST|ETF)\/(?:US|HK)\//.test(preview);
+  });
 }
 
 function lowerFileName(fileName) {
@@ -861,6 +1458,13 @@ async function detectBrokerFromFile(file) {
           reason: `识别到富途年度报表工作表：${sheetHits.slice(0, 3).join("、")}。`,
         };
       }
+      if (hasLongbridgeStockLedgerSheet(workbook)) {
+        return {
+          broker: "longbridge",
+          confidence: "high",
+          reason: "识别到长桥股票账户明细表头和业务流水编码，已默认选择长桥。",
+        };
+      }
       const preview = workbookPreviewText(workbook);
       if (hasAnyMarker(preview, FUTU_TEXT_MARKERS)) {
         return {
@@ -887,7 +1491,7 @@ async function detectBrokerFromFile(file) {
         return {
           broker: "longbridge",
           confidence: "medium",
-          reason: "文件内容包含长桥特征；当前长桥解析器主要支持 PDF 月结单，请解析前确认文件格式。",
+          reason: "文件内容包含长桥特征；当前长桥解析器支持 PDF 月结单和股票账户明细 Excel。",
         };
       }
       if (hasAnyMarker(preview, TIGER_TEXT_MARKERS)) {
@@ -1062,24 +1666,11 @@ function buildFlows() {
         price,
         amount,
         fee,
-        query: `${code} ${name}`.toLowerCase(),
+        query: searchHaystack(code, name),
       });
     });
   });
   return flows.sort((a, b) => a.date.localeCompare(b.date));
-}
-
-function txnsFor(idx, row) {
-  const s = idx + 1;
-  const base = row.market === "HK" ? 40 + ((s * 37) % 360) : 90 + ((s * 53) % 700);
-  const lot = row.market === "HK" ? [200, 400, 500, 800, 1000][s % 5] : [10, 20, 30, 50, 80][s % 5];
-  const up = row.rmb >= 0;
-  const dates = ["02-14", "04-08", "06-21", "09-30", "11-12"];
-  return [
-    { date: `${TAX_YEAR}-${dates[s % 5]}`, side: "买入", qty: lot, price: Number((base * 0.92).toFixed(2)) },
-    { date: `${TAX_YEAR}-${dates[(s + 2) % 5]}`, side: "买入", qty: Math.round(lot * 0.6), price: Number((base * 1.05).toFixed(2)) },
-    { date: `${TAX_YEAR}-${dates[(s + 4) % 5]}`, side: "卖出", qty: lot, price: Number((base * (up ? 1.16 : 0.84)).toFixed(2)) },
-  ];
 }
 
 function Market({ market }) {
@@ -1482,6 +2073,8 @@ function PnlTable({
   analysisStatus,
   fx,
   tradeActivities = [],
+  realizedTrades = [],
+  openPositions = [],
   pendingCostFlashToken,
   hasLongbridgeNoStockActivity = false,
   hasTaxSummaryNoTradeDetail = false,
@@ -1500,13 +2093,20 @@ function PnlTable({
     return [...orderedRows, ...newRows];
   }, [lockedRowOrder, openRow, rows]);
   const filteredRows = displayRows.filter((row) => {
-    const okQuery = !query || `${row.code} ${row.name}`.toLowerCase().includes(query.trim().toLowerCase());
+    const okQuery = matchesSearchQuery(searchHaystack(row.code, displayRowCode(row.code), row.name), query);
     const okMarket = market === "all" || row.market === market;
     return okQuery && okMarket;
   });
   const symbolCount = uniqueSymbolCount(rows);
   const buyActivityCount = tradeActivities.filter(isBuyLikeActivity).length;
   const sellActivityCount = tradeActivities.filter((activity) => activity.side === "sell" || activity.side === "short_open").length;
+  const unrealizedGainTotal = rows.reduce((sum, row) => (row.positionOnly && rowHasRmbPnl(row) ? sum + row.rmb : sum), 0);
+  const hasUnrealizedGain = rows.some((row) => row.positionOnly && rowHasRmbPnl(row));
+  const currentAssetMarketValue = rows.reduce((sum, row) => {
+    if (!row.positionOnly || !Number.isFinite(row.proceeds)) return sum;
+    return sum + row.proceeds * (fx[row.market] ?? 1);
+  }, 0);
+  const hasCurrentAssetMarketValue = rows.some((row) => row.positionOnly && Number.isFinite(row.proceeds));
 
   useEffect(() => {
     if (!openRow) {
@@ -1592,7 +2192,7 @@ function PnlTable({
                   </div>
                 </td>
               </tr>
-            ) : filteredRows.map((row, idx) => {
+            ) : filteredRows.map((row) => {
               const isOpen = openRow === row.key;
               return (
                 <React.Fragment key={row.key}>
@@ -1608,7 +2208,20 @@ function PnlTable({
                     <td className="stock-nm">
                       <ChevronRight className="caret" />
                       {row.name}
-                      {row.positionOnly ? <span className="row-state-badge">期末持仓</span> : null}
+                      {row.positionOnly ? <span className="row-state-badge">期末持仓，不参与计算</span> : null}
+                      {row.positionOnly ? (
+                        <span
+                          className={`row-state-badge ${rowNeedsCost(row) ? "warn" : "review"}`}
+                          title={(row.positions ?? [])
+                            .map((position) => {
+                              const source = position.source ?? "期末持仓记录";
+                              return `${source}${position.asOf ? ` · ${position.asOf}` : ""}`;
+                            })
+                            .join("\n")}
+                        >
+                          {rowNeedsCost(row) ? "需补持仓成本" : "成本记录待复核"}
+                        </span>
+                      ) : null}
                       {isUnresolvedSymbol(row.code) ? <span className="row-state-badge warn">代码待复核</span> : null}
                     </td>
                     <td className="c">
@@ -1616,7 +2229,9 @@ function PnlTable({
                     </td>
                     <td className={`r num pnl ${row.missingCost || row.positionOnly ? "" : classForNumber(row.pnlOriginal)}`}>
                       {row.missingCost
-                        ? `市值 ${fmt(row.proceeds)}`
+                        ? rowHasRmbPnl(row)
+                          ? cnSigned(row.pnlOriginal)
+                          : `卖出收入 ${fmt(row.proceeds)}`
                         : row.positionOnly
                           ? row.pnlOriginal === null
                             ? `市值 ${fmt(row.proceeds)}`
@@ -1624,31 +2239,34 @@ function PnlTable({
                           : cnSigned(row.pnlOriginal)}
                     </td>
                     <td className="r num muted">{(fx[row.market] ?? 1).toFixed(4)}</td>
-                    <td className={`r num pnl ${row.missingCost || row.positionOnly ? "pending-text" : classForNumber(row.rmb)}`}>
-                      {row.missingCost ? (
+                    <td className={`r num pnl ${rowNeedsCost(row) ? "pending-text" : rowHasRmbPnl(row) ? classForNumber(row.rmb) : "muted"}`}>
+                      {rowNeedsCost(row) ? (
                         <span key={`${row.key}-${pendingCostFlashToken}`} className={`pending-cost-label ${pendingCostFlashToken ? "pending-flash" : ""}`}>
                           待补成本
                         </span>
-                      ) : row.positionOnly ? (
-                        "不参与计算"
-                      ) : (
+                      ) : rowHasRmbPnl(row) ? (
                         cnSigned(row.rmb)
+                      ) : (
+                        "-"
                       )}
                     </td>
                   </tr>
                   {isOpen ? (
                     <PnlDetailRow
                       row={row}
-                      idx={idx}
                       method={method}
                       manualCosts={manualCosts}
                       costCorrections={costCorrections}
                       securityAliases={securityAliases}
+                      tradeActivities={tradeActivities}
+                      realizedTrades={realizedTrades}
+                      openPositions={openPositions}
                       onSubmitManualCost={onSubmitManualCost}
                       onSubmitSecurityAlias={onSubmitSecurityAlias}
                       onSubmitCostCorrection={onSubmitCostCorrection}
                       onClearCostCorrection={onClearCostCorrection}
                       analysisStatus={analysisStatus}
+                      fx={fx}
                     />
                   ) : null}
                 </React.Fragment>
@@ -1656,11 +2274,17 @@ function PnlTable({
             })}
           </tbody>
           <tfoot>
-            <tr>
-              <td colSpan="6" className="r">
+            <tr className="pnl-total-row">
+              <td className="r">当前资产市值</td>
+              <td className="r num">{hasCurrentAssetMarketValue ? fmt(currentAssetMarketValue) : "-"}</td>
+              <td colSpan="2" className="r">
                 已实现盈亏合计
               </td>
               <td className={`r num pnl ${classForNumber(summary.capitalGain)}`}>{cnSigned(summary.capitalGain)}</td>
+              <td className="r">未实现盈亏合计</td>
+              <td className={`r num pnl ${hasUnrealizedGain ? classForNumber(unrealizedGainTotal) : "muted"}`}>
+                {hasUnrealizedGain ? cnSigned(unrealizedGainTotal) : "-"}
+              </td>
             </tr>
           </tfoot>
         </table>
@@ -1671,15 +2295,44 @@ function PnlTable({
 
 function SymbolAliasForm({ row, securityAliases = {}, onSubmitSecurityAlias, analysisStatus }) {
   const aliasKey = securityAliasStateKey(row);
-  const savedSymbol = securityAliases[aliasKey]?.symbol ?? "";
-  const [draftSymbol, setDraftSymbol] = useState(savedSymbol);
   const needsAlias = isUnresolvedSymbol(row.code);
+  const currentSymbol = needsAlias ? "" : normalizeSecuritySymbolInput(displayRowCode(row.code));
+  const savedSymbol = normalizeSecuritySymbolInput(securityAliases[aliasKey]?.symbol ?? "");
+  const [draftSymbol, setDraftSymbol] = useState(savedSymbol || currentSymbol);
+  const [isEditing, setIsEditing] = useState(needsAlias);
 
   useEffect(() => {
-    setDraftSymbol(savedSymbol);
-  }, [aliasKey, savedSymbol]);
+    setDraftSymbol(savedSymbol || currentSymbol);
+    setIsEditing(needsAlias);
+  }, [aliasKey, currentSymbol, needsAlias, savedSymbol]);
 
-  if (!needsAlias) return null;
+  if (!needsAlias && !isEditing) {
+    return (
+      <div className="symbol-alias-summary" onClick={(event) => event.stopPropagation()}>
+        <span>
+          {savedSymbol ? (
+            <>
+              已订正代码 <b>{savedSymbol}</b>
+            </>
+          ) : (
+            <>如券商识别代码有误，可手动订正</>
+          )}
+        </span>
+        <button
+          className="btn small-btn"
+          type="button"
+          disabled={analysisStatus === "running"}
+          onClick={(event) => {
+            event.stopPropagation();
+            setDraftSymbol(savedSymbol || currentSymbol);
+            setIsEditing(true);
+          }}
+        >
+          <Pencil /> {savedSymbol ? "修改代码" : "订正代码"}
+        </button>
+      </div>
+    );
+  }
 
   const normalized = normalizeSecuritySymbolInput(draftSymbol);
   const canSubmit = Boolean(normalized) && analysisStatus !== "running";
@@ -1705,32 +2358,404 @@ function SymbolAliasForm({ row, securityAliases = {}, onSubmitSecurityAlias, ana
       <button className="btn primary" type="submit" disabled={!canSubmit}>
         <Check /> 保存并重算
       </button>
-      <span className="dh-note">PDF 文本层没有可读代码时，可在这里补充；后续会按该代码重新归集买卖、持仓和待补成本。</span>
+      {!needsAlias ? (
+        <button
+          className="btn"
+          type="button"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDraftSymbol(savedSymbol || currentSymbol);
+            setIsEditing(false);
+          }}
+        >
+          <X /> 取消
+        </button>
+      ) : null}
+      <span className="dh-note">PDF 文本层没有可读代码或券商识别代码有误时，可在这里订正；后续会按该代码重新归集买卖、持仓和待补成本。</span>
     </form>
+  );
+}
+
+function StockFlowDetailPanel({
+  row,
+  method,
+  tradeActivities = [],
+  realizedTrades = [],
+  openPositions = [],
+  costCorrections = {},
+  onSubmitCostCorrection,
+  onClearCostCorrection,
+  analysisStatus,
+  fx = FX,
+}) {
+  const [editingFlowCostKey, setEditingFlowCostKey] = useState(null);
+  const [flowCostDraft, setFlowCostDraft] = useState("");
+  const [flowCostMode, setFlowCostMode] = useState("unit");
+  const [detailFlowSort, setDetailFlowSort] = useState("date-asc");
+  const detailFlowSortConfig = parseSortValue(detailFlowSort, "date");
+  const matchingFlows = useMemo(
+    () =>
+      buildTradeFlowRows(tradeActivities, realizedTrades, costCorrections).filter((flow) => securityItemMatchesRow(flow, row)),
+    [costCorrections, realizedTrades, row, tradeActivities],
+  );
+  const flows = useMemo(() => {
+    const sort = parseSortValue(detailFlowSort, "date");
+    return [...matchingFlows].sort((a, b) => compareFlowsBySort(a, b, sort));
+  }, [detailFlowSort, matchingFlows]);
+  const positions = useMemo(
+    () => buildOpenPositionRows(openPositions, fx).filter((position) => securityItemMatchesRow(position, row)),
+    [fx, openPositions, row],
+  );
+  const chronologicalFlows = useMemo(() => [...matchingFlows].sort(compareFlowsByDate), [matchingFlows]);
+  const lastFlow = chronologicalFlows.length ? chronologicalFlows[chronologicalFlows.length - 1] : null;
+  const positionQuantity = positions.reduce((sum, position) => sum + (Number(position.qty) || 0), 0);
+  const positionCostBasis = positions.reduce((sum, position) => {
+    if (!Number.isFinite(position.cost) || !Number.isFinite(position.qty)) return sum;
+    return sum + position.cost * position.qty;
+  }, 0);
+  const allPositionCostsKnown = positions.length > 0 && positions.every((position) => Number.isFinite(position.cost));
+  const currentQuantity = positions.length ? positionQuantity : lastFlow?.currentQuantity ?? 0;
+  const currentAverageCost =
+    positions.length && positionQuantity > FLOW_REPLAY_EPSILON
+      ? allPositionCostsKnown
+        ? positionCostBasis / positionQuantity
+        : null
+      : lastFlow?.currentAverageCost ?? null;
+  const marketValue = positions.reduce((sum, position) => sum + (Number(position.marketValue) || 0), 0);
+  const flowGainRows = flows.filter((flow) => flow.tradeGainLoss !== null && flow.tradeGainLoss !== undefined);
+  const realizedGain =
+    row.missingCost || row.positionOnly
+      ? flowGainRows.length
+        ? flowGainRows.reduce((sum, flow) => sum + flow.tradeGainLoss, 0)
+        : null
+      : row.pnlOriginal;
+
+  return (
+    <div className="stock-flow-panel">
+      <div className="stock-flow-summary">
+        <div>
+          <span>当前持有总股数</span>
+          <b>{currentQuantity.toLocaleString()}</b>
+        </div>
+        <div>
+          <span>当前平均成本</span>
+          <b>{currentAverageCost === null || currentAverageCost === undefined ? "-" : fmtPrice(currentAverageCost)}</b>
+        </div>
+        <div>
+          <span>已实现盈亏（{row.currency}）</span>
+          <b className={realizedGain === null || realizedGain === undefined ? "" : classForNumber(realizedGain)}>
+            {realizedGain === null || realizedGain === undefined ? "-" : cnSigned(realizedGain)}
+          </b>
+        </div>
+        <div>
+          <span>期末持仓市值（RMB）</span>
+          <b>{positions.length ? fmt(marketValue) : "-"}</b>
+        </div>
+      </div>
+      {positions.length ? (
+        <div className="stock-position-strip">
+          {positions.map((position) => {
+            const costRecord = positionCostRecordStatus(position);
+            const costGapChain = costGapTransferChainForPosition(position, chronologicalFlows);
+            const costGapExplanation = costGapTransferExplanation(position, costGapChain);
+            return (
+              <div key={`${position.id ?? ""}-${position.broker ?? ""}-${position.currency}-${position.code}-${position.source ?? ""}`}>
+                <div className="position-source-line">
+                  <span>
+                    {position.source ?? "期末持仓"}
+                    {position.asOf ? ` · ${position.asOf}` : ""}
+                  </span>
+                  <em className={`position-cost-badge ${costRecord.className}`} title={costRecord.detail}>
+                    {costRecord.label}
+                  </em>
+                </div>
+                <b>
+                  {position.qty.toLocaleString()} 股 · 均价 {position.cost === null ? "-" : fmtPrice(position.cost)}
+                </b>
+                <small>
+                  未实现盈亏 {position.unrealized === null ? "-" : cnSigned(position.unrealized)} · 年末价 {fmtPrice(position.last)}
+                </small>
+                <small className="position-cost-detail">{costRecord.detail}</small>
+                {position.note ? <small className="position-record-note">{position.note}</small> : null}
+                {costGapChain.length ? (
+                  <div className="position-cost-chain">
+                    <div className="position-cost-chain-title">
+                      <Info />
+                      <span>成本缺口链路</span>
+                    </div>
+                    {costGapExplanation ? <small>{costGapExplanation}</small> : null}
+                    <ul>
+                      {costGapChain.map((flow) => (
+                        <li key={`${position.id ?? ""}-${flow.id}`}>
+                          <span className="num">{flow.date}</span>
+                          <b>{flow.side}</b>
+                          <span>{fmtQuantity(flow.qty)} 股</span>
+                          <em>{flowHasMissingCostBasis(flow) ? "未提供成本" : flow.note || flow.source}</em>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      <table className="txn-table stock-flow-table">
+        <thead>
+          <tr>
+            <th>
+              <button
+                type="button"
+                className={`th-sort ${detailFlowSortConfig.key === "date" ? "on" : ""}`}
+                onClick={() => setDetailFlowSort((current) => nextSortValue(current, "date"))}
+                aria-pressed={detailFlowSortConfig.key === "date"}
+                aria-label={`成交日期${sortDirectionLabel(detailFlowSortConfig.direction)}`}
+                title={`按成交日期${detailFlowSortConfig.direction === "asc" ? "降序" : "升序"}排序`}
+              >
+                <span>成交日期</span>
+                <span className="sort-order">{sortDirectionLabel(detailFlowSortConfig.direction)}</span>
+                <ArrowUpDown />
+              </button>
+            </th>
+            <th>来源</th>
+            <th className="c">方向</th>
+            <th className="r">数量</th>
+            <th className="r">成交价</th>
+            <th className="r">成交额 / 成本</th>
+            <th className="r" title={`按${method.tag}匹配成本后的已实现买卖盈亏`}>
+              买卖盈亏
+            </th>
+            <th className="r">当前持有总股数</th>
+            <th className="r">当前平均成本</th>
+            <th className="r">手续费</th>
+            <th className="c">订正</th>
+          </tr>
+        </thead>
+        <tbody>
+          {flows.length === 0 ? (
+            <tr>
+              <td colSpan="11">
+                <div className="empty-state detail-empty-state">
+                  <b>没有找到该标的的完整流水</b>
+                  <span>可以先检查股票代码是否需要订正；订正后会按新的代码重新归集买卖流水和持仓。</span>
+                </div>
+              </td>
+            </tr>
+          ) : (
+            flows.map((flow) => {
+              const correctionKey = flow.transferCostCorrectionKey ?? flow.realizedCostCorrectionKey;
+              const correctionKind = flow.transferCostCorrectionKey ? "transfer" : flow.realizedCostCorrectionKey ? "realized" : null;
+              const correctionValue = correctionKey ? costCorrections[correctionKey] : undefined;
+              const isCorrected = isValidManualCostValue(correctionValue);
+              const isEditing = correctionKey && editingFlowCostKey === correctionKey;
+              const correctionQuantity = flow.qty;
+              const correctionBaseCost = correctionKind === "realized" ? flow.realizedTrade?.costBasis ?? 0 : flow.amount;
+              const totalCorrectionCost = costInputToTotalCost(flowCostDraft, flowCostMode, correctionQuantity);
+              const canSubmitCorrection = totalCorrectionCost !== null && analysisStatus !== "running";
+              const unitCost =
+                flow.realizedTrade && flow.qty > 0
+                  ? flow.realizedTrade.costBasis / flow.qty
+                  : flow.qty > 0 && (isBuyLikeActivity({ side: flow.rawSide }) || flow.transferCostCorrectionKey)
+                    ? flow.amount / flow.qty
+                    : null;
+              const correctionLabel = correctionKind === "realized" ? "卖出成本" : "转入成本";
+
+              return (
+                <tr key={flow.id}>
+                  <td className="num muted">{flow.date}</td>
+                  <td>{flow.source ?? "-"}</td>
+                  <td className="c">
+                    <span className={`side ${isBuyLikeActivity({ side: flow.rawSide }) ? "bi" : "se"}`}>{flow.side}</span>
+                  </td>
+                  <td className="r num">{flow.qty.toLocaleString()}</td>
+                  <td className="r num price-cell">{fmtPrice(flow.price)}</td>
+                  <td className="r num cost-cell">
+                    {isEditing ? (
+                      <span className="cost-edit-stack">
+                        <span className="cost-edit-caption">订正{correctionLabel}</span>
+                        <CostModeToggle
+                          className="compact"
+                          value={flowCostMode}
+                          inputValue={flowCostDraft}
+                          quantity={correctionQuantity}
+                          onChange={(nextMode, nextValue) => {
+                            setFlowCostMode(nextMode);
+                            setFlowCostDraft(nextValue);
+                          }}
+                        />
+                        <input
+                          className="cost-edit-input"
+                          value={flowCostDraft}
+                          onChange={(event) => setFlowCostDraft(normalizeCostInput(event.target.value, flowCostMode))}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              setEditingFlowCostKey(null);
+                              setFlowCostDraft("");
+                            }
+                            if (event.key === "Enter" && canSubmitCorrection && totalCorrectionCost !== null) {
+                              onSubmitCostCorrection?.(correctionKey, String(totalCorrectionCost));
+                              setEditingFlowCostKey(null);
+                              setFlowCostDraft("");
+                            }
+                          }}
+                          inputMode="decimal"
+                          aria-label={costInputLabel(flow.currency, flowCostMode)}
+                          placeholder={costInputPlaceholder(flowCostMode)}
+                          autoFocus
+                        />
+                        {flowCostMode === "unit" && totalCorrectionCost !== null ? (
+                          <span className="cost-total-preview compact">
+                            总成本 {fmt(totalCorrectionCost)}
+                            <small>买入手续费需已摊入每股成本</small>
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="cost-cell-content">
+                        <span className="cost-total-line">{fmt(flow.amount)}</span>
+                        {flow.realizedTrade ? <span className="cost-unit-line">成本 {fmt(flow.realizedTrade.costBasis)}</span> : null}
+                        {unitCost !== null ? <span className="cost-unit-line">每股成本 {fmtUnit(unitCost)}</span> : null}
+                        {flow.excludedFromTaxReplay ? <span className="cost-correction-badge warn">未自动计成本</span> : null}
+                        {isCorrected ? <span className="cost-correction-badge">{correctionLabel}已订正</span> : null}
+                      </span>
+                    )}
+                  </td>
+                  <td className={`r num pnl ${flow.tradeGainLoss === null ? "muted" : classForNumber(flow.tradeGainLoss)}`}>
+                    {flow.tradeGainLoss === null ? "-" : cnSigned(flow.tradeGainLoss)}
+                  </td>
+                  <td className="r num">{flow.currentQuantity.toLocaleString()}</td>
+                  <td className="r num muted">{flow.currentAverageCost === null ? "-" : fmtPrice(flow.currentAverageCost)}</td>
+                  <td className="r num muted">{fmt(flow.fee)}</td>
+                  <td className="c">
+                    {correctionKey ? (
+                      <span className="cost-actions">
+                        {isEditing ? (
+                          <>
+                            <button
+                              className="icon-mini-btn"
+                              type="button"
+                              title="确认订正"
+                              aria-label="确认订正"
+                              disabled={!canSubmitCorrection}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (!canSubmitCorrection || totalCorrectionCost === null) return;
+                                onSubmitCostCorrection?.(correctionKey, String(totalCorrectionCost));
+                                setEditingFlowCostKey(null);
+                                setFlowCostDraft("");
+                              }}
+                            >
+                              <Check />
+                            </button>
+                            <button
+                              className="icon-mini-btn"
+                              type="button"
+                              title="取消"
+                              aria-label="取消"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEditingFlowCostKey(null);
+                                setFlowCostDraft("");
+                              }}
+                            >
+                              <X />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className="icon-mini-btn"
+                              type="button"
+                              title={`订正${correctionLabel}`}
+                              aria-label={`订正${correctionLabel}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEditingFlowCostKey(correctionKey);
+                                setFlowCostMode("unit");
+                                setFlowCostDraft(totalCostToInputValue(isCorrected ? correctionValue : correctionBaseCost, "unit", correctionQuantity));
+                              }}
+                            >
+                              <Pencil />
+                            </button>
+                            {isCorrected ? (
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="撤销订正"
+                                aria-label="撤销订正"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onClearCostCorrection?.(correctionKey);
+                                }}
+                              >
+                                <RotateCcw />
+                              </button>
+                            ) : null}
+                          </>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="muted">-</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colSpan="6" className="r">
+              当前口径已实现盈亏（{row.currency}）
+            </td>
+            <td className={`r num ${realizedGain === null || realizedGain === undefined ? "muted" : classForNumber(realizedGain)}`}>
+              {realizedGain === null || realizedGain === undefined ? "-" : cnSigned(realizedGain)}
+            </td>
+            <td colSpan="4" />
+          </tr>
+        </tfoot>
+      </table>
+    </div>
   );
 }
 
 function PnlDetailRow({
   row,
-  idx,
   method,
   manualCosts,
   costCorrections = {},
   securityAliases = {},
+  tradeActivities = [],
+  realizedTrades = [],
+  openPositions = [],
   onSubmitManualCost,
   onSubmitSecurityAlias,
   onSubmitCostCorrection,
   onClearCostCorrection,
   analysisStatus,
+  fx,
 }) {
-  const [editingCostKey, setEditingCostKey] = useState(null);
-  const [draftCost, setDraftCost] = useState("");
-  const [correctionCostMode, setCorrectionCostMode] = useState("unit");
   const [missingCostMode, setMissingCostMode] = useState("unit");
   const [missingCostDraft, setMissingCostDraft] = useState(null);
+  const activeMissingCostRequestId = row.missingCostRequest?.id ?? "";
+
+  useEffect(() => {
+    setMissingCostDraft(null);
+  }, [activeMissingCostRequestId]);
+
+  const positionCostRecords = useMemo(
+    () => buildOpenPositionRows(openPositions, fx).filter((position) => securityItemMatchesRow(position, row)),
+    [fx, openPositions, row],
+  );
+  const missingPositionCostRecords = positionCostRecords.filter((position) => position.costStatus === "missing");
 
   if (row.missingCost) {
     const request = row.missingCostRequest;
+    const requests = row.missingCostRequests?.length ? row.missingCostRequests : [request].filter(Boolean);
+    const requestGap = costBasisRequestGap(request);
     const rawValue = missingCostDraft ?? totalCostToInputValue(manualCosts[request.id], missingCostMode, request.quantity);
     const totalCost = costInputToTotalCost(rawValue, missingCostMode, request.quantity);
     const canSubmit = totalCost !== null && analysisStatus !== "running";
@@ -1742,9 +2767,16 @@ function PnlDetailRow({
               <b>
                 {displayRowCode(row.code)} · {row.name}
               </b>{" "}
-              成本缺失，暂未进入应税盈亏
+              有待补成本，结果待补齐
               <span className="dh-note">
-                已识别 {request.sellDate} 卖出 {request.quantity.toLocaleString()} 股，收入 {request.currency} {fmt(request.proceeds)}。补入这笔卖出对应的总成本或每股成本后，会重新生成 FIFO / ACB 结果。
+                当前先处理 {request.sellDate} 卖出 {fmtQuantity(request.quantity)} 股，收入 {request.currency} {fmt(request.proceeds)}。
+                {requestGap
+                  ? `按当前流水顺序，卖出时仅追踪到 ${fmtQuantity(requestGap.tracked)} 股成本，缺口 ${fmtQuantity(
+                      requestGap.missing,
+                    )} 股；后续买入不会回填这笔卖出的成本。`
+                  : "上传材料无法匹配足够买入成本。"}
+                {requests.length > 1 ? `该标的还有 ${requests.length - 1} 笔待补成本，会在保存后继续提示。` : ""}
+                请输入这笔 {fmtQuantity(request.quantity)} 股卖出的总成本或每股成本，确认后会重新生成 FIFO / ACB 结果。
               </span>
             </div>
             <SymbolAliasForm
@@ -1792,15 +2824,27 @@ function PnlDetailRow({
                 <Calculator /> 确认并重算
               </button>
             </div>
+            <StockFlowDetailPanel
+              row={row}
+              method={method}
+              tradeActivities={tradeActivities}
+              realizedTrades={realizedTrades}
+              openPositions={openPositions}
+              costCorrections={costCorrections}
+              onSubmitCostCorrection={onSubmitCostCorrection}
+              onClearCostCorrection={onClearCostCorrection}
+              analysisStatus={analysisStatus}
+              fx={fx}
+            />
           </div>
         </td>
       </tr>
     );
   }
   if (row.positionOnly) {
-    const position = row.position;
-    const avgCost = position?.quantity && Number.isFinite(position.costBasis) ? position.costBasis / position.quantity : null;
-    const lastPrice = position?.quantity ? position.marketValue / position.quantity : null;
+    const positionCostRecordNote = missingPositionCostRecords.length
+      ? `其中 ${missingPositionCostRecords.length} 条期末持仓没有读取到成本，下面已标出具体来源记录；如果这些股数来自买入或转仓，需要补对应成本。`
+      : "下面已标出每条期末持仓的成本来源；这些记录只用于核对持仓，不参与本期已实现盈亏。";
     return (
       <tr className="detail-row">
         <td colSpan="7">
@@ -1810,7 +2854,9 @@ function PnlDetailRow({
                 {displayRowCode(row.code)} · {row.name}
               </b>{" "}
               期末持仓，不参与已实现盈亏计算
-              <span className="dh-note">该行只展示期末持仓或未实现盈亏；卖出发生后才会进入财产转让所得计算。</span>
+              <span className="dh-note">
+                该行只展示期末持仓或未实现盈亏；卖出发生后才会进入财产转让所得计算。{positionCostRecordNote}
+              </span>
             </div>
             <SymbolAliasForm
               row={row}
@@ -1818,43 +2864,23 @@ function PnlDetailRow({
               onSubmitSecurityAlias={onSubmitSecurityAlias}
               analysisStatus={analysisStatus}
             />
-            <div className="position-detail-grid">
-              <div>
-                <span>持仓数量</span>
-                <b>{position.quantity.toLocaleString()}</b>
-              </div>
-              <div>
-                <span>期末市值</span>
-                <b>
-                  {row.currency} {fmt(position.marketValue)}
-                </b>
-              </div>
-              <div>
-                <span>平均成本</span>
-                <b>{avgCost === null ? "N/A" : fmtUnit(avgCost)}</b>
-              </div>
-              <div>
-                <span>期末价格</span>
-                <b>{lastPrice === null ? "N/A" : fmtPrice(lastPrice)}</b>
-              </div>
-              <div>
-                <span>未实现盈亏</span>
-                <b className={row.pnlOriginal === null ? "" : classForNumber(row.pnlOriginal)}>
-                  {row.pnlOriginal === null ? "N/A" : floatingPnlLabel(row.pnlOriginal)}
-                </b>
-              </div>
-              <div className="position-source-card">
-                <span>材料来源</span>
-                <b>{position.source}</b>
-              </div>
-            </div>
+            <StockFlowDetailPanel
+              row={row}
+              method={method}
+              tradeActivities={tradeActivities}
+              realizedTrades={realizedTrades}
+              openPositions={openPositions}
+              costCorrections={costCorrections}
+              onSubmitCostCorrection={onSubmitCostCorrection}
+              onClearCostCorrection={onClearCostCorrection}
+              analysisStatus={analysisStatus}
+              fx={fx}
+            />
           </div>
         </td>
       </tr>
     );
   }
-  const txns = row.transactions?.length ? [...row.transactions].sort(compareTransactionRows) : txnsFor(idx, row);
-  const isReal = Boolean(row.transactions?.length);
   return (
     <tr className="detail-row">
       <td colSpan="7">
@@ -1863,8 +2889,8 @@ function PnlDetailRow({
             <b>
               {displayRowCode(row.code)} · {row.name}
             </b>{" "}
-            买卖流水（{row.currency}）
-            <span className="dh-note">流水为各口径通用的原始材料；已实现盈亏按当前口径（{method.tag}）匹配成本后得出</span>
+            持仓与流水（{row.currency}）
+            <span className="dh-note">点击盈亏明细中的标的后，可直接核对该股票的期末持仓、全量成交流水，以及当前口径（{method.tag}）匹配出的买卖盈亏。</span>
           </div>
           <SymbolAliasForm
             row={row}
@@ -1872,179 +2898,18 @@ function PnlDetailRow({
             onSubmitSecurityAlias={onSubmitSecurityAlias}
             analysisStatus={analysisStatus}
           />
-          <table className="txn-table">
-            <thead>
-              <tr>
-                <th>成交日期</th>
-                <th>{isReal ? "来源" : "方向"}</th>
-                <th className="r">数量</th>
-                <th className="r" title={isReal ? "按卖出收入 / 数量计算" : undefined}>
-                  {isReal ? "卖出价格" : "成交价"}
-                </th>
-                <th className="r">{isReal ? "成本" : "成交额"}</th>
-                <th className="r">{isReal ? `收益（${row.currency}）` : "参考"}</th>
-                <th className="c">订正</th>
-              </tr>
-            </thead>
-            <tbody>
-              {txns.map((txn) => {
-                const correctionKey = isReal ? costCorrectionKeyForRealizedTradeId(txn.id) : null;
-                const correctionValue = correctionKey ? costCorrections[correctionKey] : undefined;
-                const isCorrected = isValidManualCostValue(correctionValue);
-                const isEditing = correctionKey && editingCostKey === correctionKey;
-                const quantity = txn.quantity ?? txn.qty;
-                const sellPrice = quantity > 0 ? (isReal ? txn.proceeds / quantity : txn.price) : 0;
-                const costValue = isReal ? txn.costBasis : quantity * txn.price;
-                const unitCost = quantity > 0 ? costValue / quantity : null;
-                const totalCorrectionCost = costInputToTotalCost(draftCost, correctionCostMode, quantity);
-                const canSubmitCorrection = totalCorrectionCost !== null && analysisStatus !== "running";
-
-                return (
-                  <tr key={txn.id ?? `${txn.date}-${txn.side}-${txn.qty}`}>
-                    <td className="num">{txn.sellDate ?? txn.date}</td>
-                    <td>
-                      <span className={`side ${isReal ? "se" : txn.side === "买入" ? "bi" : "se"}`}>{isReal ? txn.source : txn.side}</span>
-                    </td>
-                    <td className="r num">{quantity.toLocaleString()}</td>
-                    <td className="r num price-cell">{fmtPrice(sellPrice)}</td>
-                    <td className="r num cost-cell">
-                      {isEditing ? (
-                        <span className="cost-edit-stack">
-                          <span className="cost-edit-caption">录入方式</span>
-                          <CostModeToggle
-                            className="compact"
-                            value={correctionCostMode}
-                            inputValue={draftCost}
-                            quantity={quantity}
-                            onChange={(nextMode, nextValue) => {
-                              setCorrectionCostMode(nextMode);
-                              setDraftCost(nextValue);
-                            }}
-                          />
-                          <input
-                            className="cost-edit-input"
-                            value={draftCost}
-                            onChange={(event) => setDraftCost(normalizeCostInput(event.target.value, correctionCostMode))}
-                            onClick={(event) => event.stopPropagation()}
-                            onKeyDown={(event) => {
-                              if (event.key === "Escape") {
-                                setEditingCostKey(null);
-                                setDraftCost("");
-                              }
-                              if (event.key === "Enter" && canSubmitCorrection && totalCorrectionCost !== null) {
-                                onSubmitCostCorrection(correctionKey, String(totalCorrectionCost));
-                                setEditingCostKey(null);
-                                setDraftCost("");
-                              }
-                            }}
-                            inputMode="decimal"
-                            aria-label={costInputLabel(row.currency, correctionCostMode)}
-                            placeholder={costInputPlaceholder(correctionCostMode)}
-                            autoFocus
-                          />
-                          {correctionCostMode === "unit" && totalCorrectionCost !== null ? (
-                            <span className="cost-total-preview compact">
-                              总成本 {fmt(totalCorrectionCost)}
-                              <small>买入手续费需已摊入每股成本</small>
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : (
-                        <span className="cost-cell-content">
-                          <span className="cost-total-line">{fmt(costValue)}</span>
-                          {unitCost !== null ? <span className="cost-unit-line">每股 {fmtUnit(unitCost)}</span> : null}
-                          {isCorrected ? <span className="cost-correction-badge">已订正</span> : null}
-                        </span>
-                      )}
-                    </td>
-                    <td className={`r num ${isReal ? classForNumber(txn.gainLoss) : "muted"}`}>{isReal ? fmt(txn.gainLoss) : "-"}</td>
-                    <td className="c">
-                      {isReal ? (
-                        <span className="cost-actions">
-                          {isEditing ? (
-                            <>
-                              <button
-                                className="icon-mini-btn"
-                                type="button"
-                                title="确认订正"
-                                aria-label="确认订正"
-                                disabled={!canSubmitCorrection}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  if (!canSubmitCorrection) return;
-                                  if (totalCorrectionCost === null) return;
-                                  onSubmitCostCorrection(correctionKey, String(totalCorrectionCost));
-                                  setEditingCostKey(null);
-                                  setDraftCost("");
-                                }}
-                              >
-                                <Check />
-                              </button>
-                              <button
-                                className="icon-mini-btn"
-                                type="button"
-                                title="取消"
-                                aria-label="取消"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setEditingCostKey(null);
-                                  setDraftCost("");
-                                }}
-                              >
-                                <X />
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button
-                                className="icon-mini-btn"
-                                type="button"
-                                title="订正成本"
-                                aria-label="订正成本"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setEditingCostKey(correctionKey);
-                                  setCorrectionCostMode("unit");
-                                  setDraftCost(totalCostToInputValue(isCorrected ? correctionValue : costValue, "unit", quantity));
-                                }}
-                              >
-                                <Pencil />
-                              </button>
-                              {isCorrected ? (
-                                <button
-                                  className="icon-mini-btn"
-                                  type="button"
-                                  title="撤销订正"
-                                  aria-label="撤销订正"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    onClearCostCorrection(correctionKey);
-                                  }}
-                                >
-                                  <RotateCcw />
-                                </button>
-                              ) : null}
-                            </>
-                          )}
-                        </span>
-                      ) : (
-                        <span className="muted">-</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td colSpan="5" className="r">
-                  当前口径已实现盈亏（{row.currency}）
-                </td>
-                <td className={`r num ${classForNumber(row.pnlOriginal)}`}>{cnSigned(row.pnlOriginal)}</td>
-                <td />
-              </tr>
-            </tfoot>
-          </table>
+          <StockFlowDetailPanel
+            row={row}
+            method={method}
+            tradeActivities={tradeActivities}
+            realizedTrades={realizedTrades}
+            openPositions={openPositions}
+            costCorrections={costCorrections}
+            onSubmitCostCorrection={onSubmitCostCorrection}
+            onClearCostCorrection={onClearCostCorrection}
+            analysisStatus={analysisStatus}
+            fx={fx}
+          />
         </div>
       </td>
     </tr>
@@ -2389,6 +3254,8 @@ function Workbench({
   onClearCostCorrection,
   dividends,
   tradeActivities,
+  realizedTrades,
+  openPositions,
   fx,
   pendingCostFlashToken,
   hasLongbridgeNoStockActivity,
@@ -2445,6 +3312,8 @@ function Workbench({
                 analysisStatus={analysisStatus}
                 fx={fx}
                 tradeActivities={tradeActivities}
+                realizedTrades={realizedTrades}
+                openPositions={openPositions}
                 pendingCostFlashToken={pendingCostFlashToken}
                 hasLongbridgeNoStockActivity={hasLongbridgeNoStockActivity}
                 hasTaxSummaryNoTradeDetail={hasTaxSummaryNoTradeDetail}
@@ -2461,79 +3330,52 @@ function Workbench({
   );
 }
 
-function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, dividends, files, fx }) {
+function HoldingsPage({
+  year,
+  methodId,
+  openPositions,
+  tradeActivities,
+  realizedTrades,
+  dividends,
+  files,
+  fx,
+  costCorrections = {},
+  onSubmitCostCorrection,
+  onClearCostCorrection,
+  analysisStatus,
+}) {
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("all");
   const [side, setSide] = useState("all");
-  const [flowSort, setFlowSort] = useState("code");
+  const [positionSort, setPositionSort] = useState("code-asc");
+  const [flowSort, setFlowSort] = useState("code-asc");
   const [showPositions, setShowPositions] = useState(false);
+  const [editingFlowCostKey, setEditingFlowCostKey] = useState(null);
+  const [flowCostDraft, setFlowCostDraft] = useState("");
+  const [flowCostMode, setFlowCostMode] = useState("unit");
+  const positionSortConfig = parseSortValue(positionSort);
+  const flowSortConfig = parseSortValue(flowSort);
   const months = useMemo(
     () => coverageMonths(year, files, tradeActivities, dividends, realizedTrades, openPositions),
     [dividends, files, openPositions, realizedTrades, tradeActivities, year],
   );
-  const flows = useMemo(() => {
-    if (tradeActivities?.length) {
-      return tradeActivities.map((activity, index) => ({
-        id: `${activity.id ?? "activity"}::${index}`,
-        date: activity.date,
-        time: activity.time,
-        sequence: activity.sequence,
-        market: currencyToMarket(activity.currency, activity.market),
-        code: activity.symbol,
-        name: activity.securityName,
-        currency: activity.currency,
-        side: activitySideLabel(activity),
-        sideFilter: activitySideFilterValue(activity),
-        rawSide: activity.side,
-        qty: activity.quantity,
-        price: activity.unitPrice ?? (activity.quantity ? Math.abs(activity.amount / activity.quantity) : 0),
-        amount: activity.grossAmount ?? Math.abs(activity.amount),
-        fee: activity.fee ?? 0,
-        query: `${activity.symbol} ${activity.securityName}`.toLowerCase(),
-      }));
-    }
-    return [];
-  }, [tradeActivities]);
-  const positions = useMemo(() => {
-    if (openPositions?.length) {
-      const enriched = openPositions.map((item) => {
-        const market = currencyToMarket(item.currency, item.market);
-        const hasCostBasis = Number.isFinite(item.costBasis);
-        const hasUnrealized = Number.isFinite(item.unrealizedGainLoss);
-        const costBasis = hasCostBasis ? item.costBasis : hasUnrealized ? item.marketValue - item.unrealizedGainLoss : null;
-        const last = item.quantity ? item.marketValue / item.quantity : 0;
-        const cost = item.quantity && costBasis !== null ? costBasis / item.quantity : null;
-        const unrealized = hasUnrealized ? item.unrealizedGainLoss : costBasis !== null ? item.marketValue - costBasis : null;
-        const rmb = unrealized === null ? null : unrealized * (fx[market] ?? 1);
-        const marketValue = item.marketValue * (fx[market] ?? 1);
-        return {
-          market,
-          code: item.symbol,
-          name: item.securityName,
-          currency: item.currency,
-          qty: item.quantity,
-          cost,
-          last,
-          unrealized,
-          rmb,
-          marketValue,
-        };
-      });
-      const totalMarketValue = enriched.reduce((sum, item) => sum + item.marketValue, 0);
-      return enriched.map((item) => ({ ...item, weight: totalMarketValue ? (item.marketValue / totalMarketValue) * 100 : 0 }));
-    }
-    return [];
-  }, [fx, openPositions]);
+  const flows = useMemo(() => buildTradeFlowRows(tradeActivities, realizedTrades, costCorrections), [costCorrections, realizedTrades, tradeActivities]);
+  const positions = useMemo(() => buildOpenPositionRows(openPositions, fx), [fx, openPositions]);
+  const sortedPositions = useMemo(() => {
+    const sort = parseSortValue(positionSort);
+    return [...positions].sort((a, b) => compareOpenPositionsBySort(a, b, sort));
+  }, [positionSort, positions]);
   const hasPositionPnl = positions.some((item) => item.rmb !== null);
   const posTotal = positions.reduce((sum, item) => sum + (item.rmb ?? 0), 0);
   const filteredFlows = useMemo(() => {
     const matched = flows.filter((flow) => {
-      const okQuery = !query || flow.query.includes(query.trim().toLowerCase());
+      const okQuery = matchesSearchQuery(flow.query, query);
       const okMarket = market === "all" || flow.market === market;
       const okSide = side === "all" || flow.sideFilter === side;
       return okQuery && okMarket && okSide;
     });
-    return matched.sort(flowSort === "date" ? compareFlowsByDate : compareFlowsByCode);
+    const sort = parseSortValue(flowSort);
+    return [...matched].sort((a, b) => compareFlowsBySort(a, b, sort));
   }, [flowSort, flows, market, query, side]);
 
   return (
@@ -2571,43 +3413,68 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
               <thead>
                 <tr>
                   <th>市场</th>
-                  <th>代码</th>
+                  <th>
+                    <button
+                      type="button"
+                      className={`th-sort ${positionSortConfig.key === "code" ? "on" : ""}`}
+                      onClick={() => setPositionSort((current) => nextSortValue(current, "code"))}
+                      aria-pressed={positionSortConfig.key === "code"}
+                      aria-label={`代码${sortDirectionLabel(positionSortConfig.direction)}`}
+                      title={`按股票代码${positionSortConfig.direction === "asc" ? "降序" : "升序"}排序`}
+                    >
+                      <span>代码</span>
+                      <span className="sort-order">{sortDirectionLabel(positionSortConfig.direction)}</span>
+                      <ArrowUpDown />
+                    </button>
+                  </th>
                   <th>名称</th>
                   <th className="r">持仓数量</th>
                   <th className="r">平均成本</th>
                   <th className="r">年末价</th>
                   <th className="r">浮动盈亏（原币）</th>
                   <th className="r">浮动盈亏（RMB）</th>
+                  <th>成本记录</th>
                   <th className="r">仓位占比</th>
                 </tr>
               </thead>
               <tbody>
-                {positions.map((position) => (
-                  <tr key={`${position.market}-${position.code}`}>
-                    <td>
-                      <Market market={position.market} />
-                    </td>
-                    <td className="code-cell">{position.code}</td>
-                    <td className="stock-nm">{position.name}</td>
-                    <td className="r num">{position.qty.toLocaleString()}</td>
-                    <td className="r num muted">{position.cost === null ? "-" : position.cost.toFixed(2)}</td>
-                    <td className="r num">{position.last.toFixed(2)}</td>
-                    <td className={`r num ${position.unrealized === null ? "muted" : classForNumber(position.unrealized)}`}>
-                      {position.unrealized === null ? "-" : cnSigned(position.unrealized)}
-                    </td>
-                    <td className={`r num ${position.rmb === null ? "muted" : classForNumber(position.rmb)}`}>{position.rmb === null ? "-" : cnSigned(position.rmb)}</td>
-                    <td className="r num">
-                      {position.weight.toFixed(1)}%
-                      <span className="bar">
-                        <i style={{ width: `${Math.max(position.weight, 3).toFixed(0)}%` }} />
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {sortedPositions.map((position) => {
+                  const costRecord = positionCostRecordStatus(position);
+                  return (
+                    <tr key={`${position.id ?? ""}-${position.market}-${position.code}-${position.source ?? ""}`}>
+                      <td>
+                        <Market market={position.market} />
+                      </td>
+                      <td className="code-cell">{position.code}</td>
+                      <td className="stock-nm">{position.name}</td>
+                      <td className="r num">{position.qty.toLocaleString()}</td>
+                      <td className="r num muted">{position.cost === null ? "-" : position.cost.toFixed(2)}</td>
+                      <td className="r num">{position.last.toFixed(2)}</td>
+                      <td className={`r num ${position.unrealized === null ? "muted" : classForNumber(position.unrealized)}`}>
+                        {position.unrealized === null ? "-" : cnSigned(position.unrealized)}
+                      </td>
+                      <td className={`r num ${position.rmb === null ? "muted" : classForNumber(position.rmb)}`}>
+                        {position.rmb === null ? "-" : cnSigned(position.rmb)}
+                      </td>
+                      <td className="position-record-cell">
+                        <span className={`position-cost-badge ${costRecord.className}`} title={costRecord.detail}>
+                          {costRecord.label}
+                        </span>
+                        <small title={position.source ?? ""}>{positionCostRecordTitle(position)}</small>
+                      </td>
+                      <td className="r num">
+                        {position.weight.toFixed(1)}%
+                        <span className="bar">
+                          <i style={{ width: `${Math.max(position.weight, 3).toFixed(0)}%` }} />
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
               <tfoot>
                 <tr>
-                  <td colSpan="7" className="r">
+                  <td colSpan="8" className="r">
                     未实现浮盈合计（RMB）
                   </td>
                   <td className={`r num ${hasPositionPnl ? classForNumber(posTotal) : "muted"}`}>{hasPositionPnl ? cnSigned(posTotal) : "-"}</td>
@@ -2650,8 +3517,10 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
           <Segmented
             value={flowSort}
             options={[
-              { value: "date", label: "按日期" },
-              { value: "code", label: "按代码" },
+              { value: "date-asc", label: "日期升序" },
+              { value: "date-desc", label: "日期降序" },
+              { value: "code-asc", label: "代码升序" },
+              { value: "code-desc", label: "代码降序" },
             ]}
             onChange={setFlowSort}
           />
@@ -2667,12 +3536,14 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
                 <th>
                   <button
                     type="button"
-                    className={`th-sort ${flowSort === "date" ? "on" : ""}`}
-                    onClick={() => setFlowSort("date")}
-                    aria-pressed={flowSort === "date"}
-                    title="按成交日期排序"
+                    className={`th-sort ${flowSortConfig.key === "date" ? "on" : ""}`}
+                    onClick={() => setFlowSort((current) => nextSortValue(current, "date"))}
+                    aria-pressed={flowSortConfig.key === "date"}
+                    aria-label={`成交日期${flowSortConfig.key === "date" ? sortDirectionLabel(flowSortConfig.direction) : "升序"}`}
+                    title={`按成交日期${flowSortConfig.key === "date" && flowSortConfig.direction === "asc" ? "降序" : "升序"}排序`}
                   >
                     <span>成交日期</span>
+                    {flowSortConfig.key === "date" ? <span className="sort-order">{sortDirectionLabel(flowSortConfig.direction)}</span> : null}
                     <ArrowUpDown />
                   </button>
                 </th>
@@ -2680,12 +3551,14 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
                 <th>
                   <button
                     type="button"
-                    className={`th-sort ${flowSort === "code" ? "on" : ""}`}
-                    onClick={() => setFlowSort("code")}
-                    aria-pressed={flowSort === "code"}
-                    title="按股票代码排序"
+                    className={`th-sort ${flowSortConfig.key === "code" ? "on" : ""}`}
+                    onClick={() => setFlowSort((current) => nextSortValue(current, "code"))}
+                    aria-pressed={flowSortConfig.key === "code"}
+                    aria-label={`代码${flowSortConfig.key === "code" ? sortDirectionLabel(flowSortConfig.direction) : "升序"}`}
+                    title={`按股票代码${flowSortConfig.key === "code" && flowSortConfig.direction === "asc" ? "降序" : "升序"}排序`}
                   >
                     <span>代码</span>
+                    {flowSortConfig.key === "code" ? <span className="sort-order">{sortDirectionLabel(flowSortConfig.direction)}</span> : null}
                     <ArrowUpDown />
                   </button>
                 </th>
@@ -2695,30 +3568,163 @@ function HoldingsPage({ year, openPositions, tradeActivities, realizedTrades, di
                 <th className="r">数量</th>
                 <th className="r">成交价</th>
                 <th className="r">成交额（原币）</th>
+                <th className="r" title={`按${methodById(methodId).tag}匹配成本后的已实现买卖盈亏`}>
+                  买卖盈亏
+                </th>
+                <th className="r">当前持有总股数</th>
+                <th className="r">当前平均成本</th>
                 <th className="r">手续费</th>
+                <th className="c">订正</th>
               </tr>
             </thead>
             <tbody>
-              {filteredFlows.map((flow) => (
-                <tr key={flow.id}>
-                  <td className="num muted">{flow.date}</td>
-                  <td>
-                    <Market market={flow.market} />
-                  </td>
-                  <td className="code-cell">{flow.code}</td>
-                  <td className="stock-nm">{flow.name}</td>
-                  <td className="c">
-                    <span className={`side ${isBuyLikeActivity({ side: flow.rawSide }) ? "bi" : "se"}`}>{flow.side}</span>
-                  </td>
-                  <td className="c">
-                    <span className="ccy">{flow.currency}</span>
-                  </td>
-                  <td className="r num">{flow.qty.toLocaleString()}</td>
-                  <td className="r num">{flow.price.toFixed(2)}</td>
-                  <td className="r num">{fmt(flow.amount)}</td>
-                  <td className="r num muted">{flow.fee.toFixed(2)}</td>
-                </tr>
-              ))}
+              {filteredFlows.map((flow) => {
+                const correctionKey = flow.costCorrectionKey;
+                const correctionValue = correctionKey ? costCorrections[correctionKey] : undefined;
+                const isCorrected = isValidManualCostValue(correctionValue);
+                const isEditing = correctionKey && editingFlowCostKey === correctionKey;
+                const totalCorrectionCost = costInputToTotalCost(flowCostDraft, flowCostMode, flow.qty);
+                const canSubmitCorrection = totalCorrectionCost !== null && analysisStatus !== "running";
+                return (
+                  <tr key={flow.id}>
+                    <td className="num muted">{flow.date}</td>
+                    <td>
+                      <Market market={flow.market} />
+                    </td>
+                    <td className="code-cell">{flow.code}</td>
+                    <td className="stock-nm">{flow.name}</td>
+                    <td className="c">
+                      <span className={`side ${isBuyLikeActivity({ side: flow.rawSide }) ? "bi" : "se"}`}>{flow.side}</span>
+                    </td>
+                    <td className="c">
+                      <span className="ccy">{flow.currency}</span>
+                    </td>
+                    <td className="r num">{flow.qty.toLocaleString()}</td>
+                    <td className="r num">{flow.price.toFixed(2)}</td>
+                    <td className="r num cost-cell">
+                      {isEditing ? (
+                        <span className="cost-edit-stack">
+                          <span className="cost-edit-caption">录入方式</span>
+                          <CostModeToggle
+                            className="compact"
+                            value={flowCostMode}
+                            inputValue={flowCostDraft}
+                            quantity={flow.qty}
+                            onChange={(nextMode, nextValue) => {
+                              setFlowCostMode(nextMode);
+                              setFlowCostDraft(nextValue);
+                            }}
+                          />
+                          <input
+                            className="cost-edit-input"
+                            value={flowCostDraft}
+                            onChange={(event) => setFlowCostDraft(normalizeCostInput(event.target.value, flowCostMode))}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setEditingFlowCostKey(null);
+                                setFlowCostDraft("");
+                              }
+                              if (event.key === "Enter" && canSubmitCorrection && totalCorrectionCost !== null) {
+                                onSubmitCostCorrection?.(correctionKey, String(totalCorrectionCost));
+                                setEditingFlowCostKey(null);
+                                setFlowCostDraft("");
+                              }
+                            }}
+                            inputMode="decimal"
+                            aria-label={costInputLabel(flow.currency, flowCostMode)}
+                            placeholder={costInputPlaceholder(flowCostMode)}
+                            autoFocus
+                          />
+                          {flowCostMode === "unit" && totalCorrectionCost !== null ? (
+                            <span className="cost-total-preview compact">
+                              总成本 {fmt(totalCorrectionCost)}
+                              <small>买入手续费需已摊入每股成本</small>
+                            </span>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="cost-cell-content">
+                          <span className="cost-total-line">{fmt(flow.amount)}</span>
+                          {flow.excludedFromTaxReplay ? <span className="cost-correction-badge warn">未自动计成本</span> : null}
+                          {isCorrected ? <span className="cost-correction-badge">已订正</span> : null}
+                        </span>
+                      )}
+                    </td>
+                    <td className={`r num pnl ${flow.tradeGainLoss === null ? "muted" : classForNumber(flow.tradeGainLoss)}`}>
+                      {flow.tradeGainLoss === null ? "-" : cnSigned(flow.tradeGainLoss)}
+                    </td>
+                    <td className="r num">{flow.currentQuantity.toLocaleString()}</td>
+                    <td className="r num muted">{flow.currentAverageCost === null ? "-" : fmtPrice(flow.currentAverageCost)}</td>
+                    <td className="r num muted">{flow.fee.toFixed(2)}</td>
+                    <td className="c">
+                      {correctionKey ? (
+                        <span className="cost-actions">
+                          {isEditing ? (
+                            <>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="确认订正"
+                                aria-label="确认订正"
+                                disabled={!canSubmitCorrection}
+                                onClick={() => {
+                                  if (!canSubmitCorrection || totalCorrectionCost === null) return;
+                                  onSubmitCostCorrection?.(correctionKey, String(totalCorrectionCost));
+                                  setEditingFlowCostKey(null);
+                                  setFlowCostDraft("");
+                                }}
+                              >
+                                <Check />
+                              </button>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="取消"
+                                aria-label="取消"
+                                onClick={() => {
+                                  setEditingFlowCostKey(null);
+                                  setFlowCostDraft("");
+                                }}
+                              >
+                                <X />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="icon-mini-btn"
+                                type="button"
+                                title="订正转入成本"
+                                aria-label="订正转入成本"
+                                onClick={() => {
+                                  setEditingFlowCostKey(correctionKey);
+                                  setFlowCostMode("unit");
+                                  setFlowCostDraft(totalCostToInputValue(isCorrected ? correctionValue : flow.amount, "unit", flow.qty));
+                                }}
+                              >
+                                <Pencil />
+                              </button>
+                              {isCorrected ? (
+                                <button
+                                  className="icon-mini-btn"
+                                  type="button"
+                                  title="撤销订正"
+                                  aria-label="撤销订正"
+                                  onClick={() => onClearCostCorrection?.(correctionKey)}
+                                >
+                                  <RotateCcw />
+                                </button>
+                              ) : null}
+                            </>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="muted">-</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -3248,6 +4254,7 @@ function CostBasisModal({ request, value, analysisStatus, onSubmit, onClose }) {
     setInputValue(totalCostToInputValue(value, "unit", request.quantity));
   }, [request.id, request.quantity, value]);
 
+  const requestGap = costBasisRequestGap(request);
   const totalCost = costInputToTotalCost(inputValue, mode, request.quantity);
   const canSubmit = totalCost !== null && analysisStatus !== "running";
   return (
@@ -3262,7 +4269,13 @@ function CostBasisModal({ request, value, analysisStatus, onSubmit, onClose }) {
         <span className="modal-kicker warning">需要补充</span>
         <h2 id="cost-basis-title">{request.symbol} 历史成本缺失</h2>
         <p>
-          系统检测到目标年度卖出 {request.quantity.toLocaleString()} 股 {request.securityName}，但上传材料无法匹配足够买入成本。请输入这笔卖出对应的总成本或每股成本，确认后会立即重新计算 FIFO / ACB。
+          系统检测到目标年度卖出 {fmtQuantity(request.quantity)} 股 {request.securityName}。
+          {requestGap
+            ? `按当前流水顺序，卖出时仅追踪到 ${fmtQuantity(requestGap.tracked)} 股成本，缺口 ${fmtQuantity(
+                requestGap.missing,
+              )} 股；后续买入不会回填这笔卖出的成本。`
+            : "上传材料无法匹配足够买入成本。"}
+          请输入这笔卖出对应的总成本或每股成本，确认后会立即重新计算 FIFO / ACB。
         </p>
         <div className="cost-basis-card">
           <div>
@@ -3275,6 +4288,14 @@ function CostBasisModal({ request, value, analysisStatus, onSubmit, onClose }) {
               {request.currency} {fmt(request.proceeds)}
             </b>
           </div>
+          {requestGap ? (
+            <div>
+              <span>成本缺口</span>
+              <b>
+                {fmtQuantity(requestGap.missing)} / {fmtQuantity(request.quantity)} 股
+              </b>
+            </div>
+          ) : null}
           <div>
             <span>券商</span>
             <b>{request.broker}</b>
@@ -3774,7 +4795,7 @@ export default function App() {
             : `${floatingPnlLabel(row.pnlOriginal)}（不计入）`
           : row.pnlOriginal.toFixed(2),
       (fx[row.market] ?? 1).toFixed(4),
-      row.missingCost ? "" : row.positionOnly ? "不参与计算" : row.rmb.toFixed(2),
+      rowNeedsCost(row) ? "待补成本" : rowHasRmbPnl(row) ? row.rmb.toFixed(2) : "",
     ]);
     const csv = [header, ...body].map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
@@ -3897,6 +4918,8 @@ export default function App() {
           onClearCostCorrection={clearCostCorrection}
           dividends={dividends}
           tradeActivities={tradeActivities}
+          realizedTrades={realizedTrades}
+          openPositions={openPositions}
           fx={fx}
           pendingCostFlashToken={pendingCostFlashToken}
           hasLongbridgeNoStockActivity={hasLongbridgeNoStockActivity}
@@ -3906,12 +4929,17 @@ export default function App() {
       {page === "holdings" ? (
         <HoldingsPage
           year={year}
+          methodId={methodId}
           openPositions={openPositions}
           tradeActivities={tradeActivities}
           realizedTrades={realizedTrades}
           dividends={dividends}
           files={files}
           fx={fx}
+          costCorrections={costCorrections}
+          onSubmitCostCorrection={submitCostCorrection}
+          onClearCostCorrection={clearCostCorrection}
+          analysisStatus={analysisStatus}
         />
       ) : null}
       {page === "report" ? (
