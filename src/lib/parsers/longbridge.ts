@@ -491,6 +491,11 @@ function normalizeDate(value: string) {
   return value.replace(/\./g, "-");
 }
 
+function displayChineseDate(value: string) {
+  const [year, month, day] = normalizeDate(value).split("-");
+  return year && month && day ? `${year}年${month}月${day}日` : value;
+}
+
 function normalizeCode(value: string) {
   const text = value.trim().toUpperCase();
   return /^\d+$/.test(text) ? text.replace(/^0+/, "") || "0" : text;
@@ -2362,8 +2367,8 @@ function buildRealizedTrades(
       issues.push({
         id: `${move.sourcePdf}-${move.code}-transfer-in`,
         severity: "warning",
-        title: `${displayCode(move.code)} ${move.moveType}成本需复核`,
-        detail: "已按长桥月结单月末成本基准暂估；正式申报建议用转出券商原始成本凭证确认。",
+        title: `标的 ${displayCode(move.code)} 在 ${displayChineseDate(move.date)} 存在转仓`,
+        detail: "已经按照券商月结单暂估，正式申报时建议用转出券商原始成本凭证确认。",
         source: move.sourcePdf,
       });
       sequence += 1;
