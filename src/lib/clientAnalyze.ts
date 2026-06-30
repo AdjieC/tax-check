@@ -7,6 +7,7 @@ import { taxConfigForYear } from "@/lib/tax/config";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
 import { parseHuashengWorkbooks } from "@/lib/parsers/huasheng";
+import { parseHuataiPdfs } from "@/lib/parsers/huatai";
 import { parseIbkrPdfs } from "@/lib/parsers/ibkr";
 import { parseLongbridgeFiles, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
 import { parsePandaPdfs } from "@/lib/parsers/panda";
@@ -16,7 +17,17 @@ import { parseZirconPdfs } from "@/lib/parsers/zircon";
 import { ParserValidationError } from "@/lib/parsers/common";
 import type { CostBasisCorrection, CostBasisMethod, ParsedInput, TaxAnalysis } from "@/lib/tax/types";
 
-export type BrokerId = "futu" | "longbridge" | "panda" | "cmbWingLung" | "tiger" | "zircon" | "usmart" | "ibkr" | "huasheng";
+export type BrokerId =
+  | "futu"
+  | "longbridge"
+  | "panda"
+  | "cmbWingLung"
+  | "tiger"
+  | "zircon"
+  | "usmart"
+  | "ibkr"
+  | "huasheng"
+  | "huatai";
 
 export interface UploadFileEntry {
   id: string;
@@ -131,6 +142,7 @@ export async function analyzeUploadedFiles(options: {
 
   const futuFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const huashengFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const huataiFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const longbridgeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const pandaFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const cmbWingLungFiles: Array<{ name: string; data: ArrayBuffer }> = [];
@@ -153,6 +165,11 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为华盛，但华盛解析器只接受“证券交易记录表”和“公司行动记录表”Excel。`, file.name);
       }
       huashengFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else if (entry.broker === "huatai") {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为华泰，但华泰解析器只接受 PDF 月结单。`, file.name);
+      }
+      huataiFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "longbridge") {
       if (!lower.endsWith(".pdf") && !lower.endsWith(".xlsx") && !lower.endsWith(".xls")) {
         throw new ParserValidationError(`${file.name} 被标记为长桥，但长桥解析器只接受 PDF 月结单或股票账户明细 Excel。`, file.name);
@@ -197,6 +214,17 @@ export async function analyzeUploadedFiles(options: {
   }
   if (huashengFiles.length > 0) {
     inputs.push(parseHuashengWorkbooks(huashengFiles, options.manualCosts ?? [], options.taxYear));
+  }
+  if (huataiFiles.length > 0) {
+    const parsed = await parseHuataiPdfs(huataiFiles, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
   }
   if (longbridgeFiles.length > 0) {
     const hasLongbridgePdf = longbridgeFiles.some((file) => /\.pdf$/i.test(file.name));

@@ -1135,67 +1135,82 @@ async function extractPdfLines(fileName: string, data: ArrayBuffer, password?: s
   if (isBrowser) {
     pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   }
-  const loadingTask = pdfjs.getDocument({
-    data: new Uint8Array(data.slice(0)),
-    password,
-    disableWorker: !isBrowser,
-    disableFontFace: true,
-    isEvalSupported: false,
-  } as Parameters<typeof pdfjs.getDocument>[0]);
-  const document = await loadingTask.promise;
+  let loadingTask;
+  let pdfDocument;
   const pages: TextLine[][] = [];
 
-  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-    const page = await document.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
-    const content = await page.getTextContent();
-    const tokens = content.items
-      .flatMap((item) => {
-        const candidate = item as PdfTextItemLike;
-        if (typeof candidate.str !== "string" || candidate.str.trim().length === 0) return [];
-        if (!Array.isArray(candidate.transform)) return [];
-        return [
-          {
-            text: clean(candidate.str),
-            x: Number(candidate.transform[4] ?? 0),
-            y: Number(candidate.transform[5] ?? 0),
-          },
-        ];
-      })
-      .sort((a, b) => b.y - a.y || a.x - b.x);
+  try {
+    loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(data.slice(0)),
+      password,
+      disableWorker: !isBrowser,
+      disableFontFace: true,
+      isEvalSupported: false,
+    } as Parameters<typeof pdfjs.getDocument>[0]);
+    pdfDocument = await loadingTask.promise;
 
-    const groups: Array<{ y: number; tokens: TextToken[] }> = [];
-    for (const token of tokens) {
-      let group = groups.find((candidate) => Math.abs(candidate.y - token.y) < 2.2);
-      if (!group) {
-        group = { y: token.y, tokens: [] };
-        groups.push(group);
+    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+      const page = await pdfDocument.getPage(pageNumber);
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        const content = await page.getTextContent();
+        const tokens = content.items
+          .flatMap((item) => {
+            const candidate = item as PdfTextItemLike;
+            if (typeof candidate.str !== "string" || candidate.str.trim().length === 0) return [];
+            if (!Array.isArray(candidate.transform)) return [];
+            return [
+              {
+                text: clean(candidate.str),
+                x: Number(candidate.transform[4] ?? 0),
+                y: Number(candidate.transform[5] ?? 0),
+              },
+            ];
+          })
+          .sort((a, b) => b.y - a.y || a.x - b.x);
+
+        const groups: Array<{ y: number; tokens: TextToken[] }> = [];
+        for (const token of tokens) {
+          let group = groups.find((candidate) => Math.abs(candidate.y - token.y) < 2.2);
+          if (!group) {
+            group = { y: token.y, tokens: [] };
+            groups.push(group);
+          }
+          group.tokens.push(token);
+        }
+
+        const lines = groups
+          .sort((a, b) => b.y - a.y)
+          .map((group) => {
+            const sortedTokens = group.tokens.sort((a, b) => a.x - b.x);
+            const minX = Math.min(...sortedTokens.map((token) => token.x));
+            const maxX = Math.max(...sortedTokens.map((token) => token.x));
+            const lineY = sortedTokens.reduce((sum, token) => sum + token.y, 0) / sortedTokens.length;
+            return {
+              page: pageNumber,
+              text: clean(sortedTokens.map((token) => token.text).join(" ")),
+              tokens: sortedTokens,
+              bounds: {
+                x: minX,
+                y: lineY,
+                width: Math.max(1, maxX - minX),
+                height: 14,
+                pageWidth: viewport.width,
+                pageHeight: viewport.height,
+              },
+            };
+          });
+        pages.push(lines);
+      } finally {
+        page.cleanup?.();
       }
-      group.tokens.push(token);
     }
-
-    const lines = groups
-      .sort((a, b) => b.y - a.y)
-      .map((group) => {
-        const sortedTokens = group.tokens.sort((a, b) => a.x - b.x);
-        const minX = Math.min(...sortedTokens.map((token) => token.x));
-        const maxX = Math.max(...sortedTokens.map((token) => token.x));
-        const lineY = sortedTokens.reduce((sum, token) => sum + token.y, 0) / sortedTokens.length;
-        return {
-          page: pageNumber,
-          text: clean(sortedTokens.map((token) => token.text).join(" ")),
-          tokens: sortedTokens,
-          bounds: {
-            x: minX,
-            y: lineY,
-            width: Math.max(1, maxX - minX),
-            height: 14,
-            pageWidth: viewport.width,
-            pageHeight: viewport.height,
-          },
-        };
-      });
-    pages.push(lines);
+  } finally {
+    if (pdfDocument) {
+      await pdfDocument.destroy?.();
+    } else {
+      await loadingTask?.destroy?.();
+    }
   }
 
   if (pages.length === 0) {
@@ -1783,6 +1798,9 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+const DIVIDEND_EVIDENCE_RENDER_SCALE = 1.35;
+const DIVIDEND_EVIDENCE_IMAGE_QUALITY = 0.72;
+
 async function attachDividendScreenshots(
   fileName: string,
   data: ArrayBuffer,
@@ -1795,61 +1813,83 @@ async function attachDividendScreenshots(
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
     pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-    const loadingTask = pdfjs.getDocument({
-      data: new Uint8Array(data.slice(0)),
-      password,
-      disableFontFace: true,
-      isEvalSupported: false,
-    } as Parameters<typeof pdfjs.getDocument>[0]);
-    const pdfDocument = await loadingTask.promise;
-    const targetsByPage = new Map<number, CashFlowRecord[]>();
-    for (const target of targets) {
-      const pageTargets = targetsByPage.get(target.page) ?? [];
-      pageTargets.push(target);
-      targetsByPage.set(target.page, pageTargets);
-    }
+    let loadingTask;
+    let pdfDocument;
+    try {
+      loadingTask = pdfjs.getDocument({
+        data: new Uint8Array(data),
+        password,
+        disableFontFace: true,
+        isEvalSupported: false,
+      } as Parameters<typeof pdfjs.getDocument>[0]);
+      pdfDocument = await loadingTask.promise;
 
-    for (const [pageNumber, pageTargets] of targetsByPage) {
-      const page = await pdfDocument.getPage(pageNumber);
-      const scale = 2;
-      const viewport = page.getViewport({ scale });
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
-      const canvasContext = canvas.getContext("2d");
-      if (!canvasContext) continue;
-      await page.render({ canvasContext, viewport }).promise;
+      const targetsByPage = new Map<number, CashFlowRecord[]>();
+      for (const target of targets) {
+        const pageTargets = targetsByPage.get(target.page) ?? [];
+        pageTargets.push(target);
+        targetsByPage.set(target.page, pageTargets);
+      }
 
-      for (const target of pageTargets) {
-        if (!target.evidence) continue;
-        const { bounds } = target.evidence;
-        const pageWidth = bounds.pageWidth || viewport.width / scale;
-        const pageHeight = bounds.pageHeight || viewport.height / scale;
-        const rowCanvasY = (pageHeight - bounds.y) * scale;
-        const cropXPdf = 0;
-        const cropHeightPx = Math.min(180 * scale, canvas.height);
-        const cropYPx = clampNumber(rowCanvasY - 58 * scale, 0, Math.max(0, canvas.height - cropHeightPx));
-        const cropWidthPx = Math.min(canvas.width - cropXPdf * scale, (pageWidth - cropXPdf) * scale);
-        const boundedCropHeightPx = Math.min(cropHeightPx, canvas.height - cropYPx);
-        if (cropWidthPx <= 0 || boundedCropHeightPx <= 0) continue;
+      for (const [pageNumber, pageTargets] of targetsByPage) {
+        const page = await pdfDocument.getPage(pageNumber);
+        try {
+          const scale = DIVIDEND_EVIDENCE_RENDER_SCALE;
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const canvasContext = canvas.getContext("2d");
+          if (!canvasContext) continue;
+          await page.render({ canvasContext, viewport }).promise;
 
-        const cropCanvas = document.createElement("canvas");
-        cropCanvas.width = Math.ceil(cropWidthPx);
-        cropCanvas.height = Math.ceil(boundedCropHeightPx);
-        const cropContext = cropCanvas.getContext("2d");
-        if (!cropContext) continue;
-        cropContext.drawImage(
-          canvas,
-          cropXPdf * scale,
-          cropYPx,
-          cropWidthPx,
-          boundedCropHeightPx,
-          0,
-          0,
-          cropCanvas.width,
-          cropCanvas.height,
-        );
-        target.evidence.imageDataUrl = cropCanvas.toDataURL("image/jpeg", 0.9);
+          try {
+            for (const target of pageTargets) {
+              if (!target.evidence) continue;
+              const { bounds } = target.evidence;
+              const pageWidth = bounds.pageWidth || viewport.width / scale;
+              const pageHeight = bounds.pageHeight || viewport.height / scale;
+              const rowCanvasY = (pageHeight - bounds.y) * scale;
+              const cropXPdf = 0;
+              const cropHeightPx = Math.min(180 * scale, canvas.height);
+              const cropYPx = clampNumber(rowCanvasY - 58 * scale, 0, Math.max(0, canvas.height - cropHeightPx));
+              const cropWidthPx = Math.min(canvas.width - cropXPdf * scale, (pageWidth - cropXPdf) * scale);
+              const boundedCropHeightPx = Math.min(cropHeightPx, canvas.height - cropYPx);
+              if (cropWidthPx <= 0 || boundedCropHeightPx <= 0) continue;
+
+              const cropCanvas = document.createElement("canvas");
+              cropCanvas.width = Math.ceil(cropWidthPx);
+              cropCanvas.height = Math.ceil(boundedCropHeightPx);
+              const cropContext = cropCanvas.getContext("2d");
+              if (!cropContext) continue;
+              cropContext.drawImage(
+                canvas,
+                cropXPdf * scale,
+                cropYPx,
+                cropWidthPx,
+                boundedCropHeightPx,
+                0,
+                0,
+                cropCanvas.width,
+                cropCanvas.height,
+              );
+              target.evidence.imageDataUrl = cropCanvas.toDataURL("image/jpeg", DIVIDEND_EVIDENCE_IMAGE_QUALITY);
+              cropCanvas.width = 0;
+              cropCanvas.height = 0;
+            }
+          } finally {
+            canvas.width = 0;
+            canvas.height = 0;
+          }
+        } finally {
+          page.cleanup?.();
+        }
+      }
+    } finally {
+      if (pdfDocument) {
+        await pdfDocument.destroy?.();
+      } else {
+        await loadingTask?.destroy?.();
       }
     }
   } catch {
