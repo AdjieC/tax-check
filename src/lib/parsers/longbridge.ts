@@ -311,6 +311,19 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
     market: "美国市场",
     currency: "USD",
   },
+  "direxion daily ftse china bull 3x etf": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "direxion daily ftse china bull 3x shares": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "ftse china bull 3x": { code: "YINN", name: "Direxion Daily FTSE China Bull 3X ETF", market: "美国市场", currency: "USD" },
   "kulr tech": { code: "KULR", name: "KULR Tech", market: "美国市场", currency: "USD" },
   meta: { code: "META", name: "Meta", market: "美国市场", currency: "USD" },
   "meta platforms": { code: "META", name: "Meta", market: "美国市场", currency: "USD" },
@@ -348,6 +361,10 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   美团: { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
   "美团 w": { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
   美团点评: { code: "03690", name: "美团-W", market: "香港市场", currency: "HKD" },
+  海天味业: { code: "03288", name: "海天味业", market: "香港市场", currency: "HKD" },
+  金斯瑞生物科技: { code: "01548", name: "金斯瑞生物科技", market: "香港市场", currency: "HKD" },
+  恒瑞医药: { code: "01276", name: "恒瑞医药", market: "香港市场", currency: "HKD" },
+  三花智控: { code: "02050", name: "三花智控", market: "香港市场", currency: "HKD" },
   爱康医疗: { code: "01789", name: "爱康医疗", market: "香港市场", currency: "HKD" },
   爱康医疗控股: { code: "01789", name: "爱康医疗", market: "香港市场", currency: "HKD" },
   洛克希德马丁: { code: "LMT", name: "洛克希德马丁", market: "美国市场", currency: "USD" },
@@ -385,6 +402,30 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   蔚来: { code: "NIO", name: "蔚来", market: "美国市场", currency: "USD" },
   小鹏: { code: "XPEV", name: "小鹏", market: "美国市场", currency: "USD" },
   理想汽车: { code: "LI", name: "理想汽车", market: "美国市场", currency: "USD" },
+  "富时中国 3 倍做多 etf": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "富时中国3倍做多etf": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "富时中国三倍做多 etf": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "富时中国三倍做多etf": {
+    code: "YINN",
+    name: "Direxion Daily FTSE China Bull 3X ETF",
+    market: "美国市场",
+    currency: "USD",
+  },
   "pro ultr cvix shrt": { code: "UVXY", name: "ProShares Ultra VIX Short-Term Futures ETF", market: "美国市场", currency: "USD" },
   "pro ultr vix shrt": { code: "UVXY", name: "ProShares Ultra VIX Short-Term Futures ETF", market: "美国市场", currency: "USD" },
   "red cat": { code: "RCAT", name: "Red Cat", market: "美国市场", currency: "USD" },
@@ -393,7 +434,45 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
   "satixfy communications": { code: "SATX", name: "SatixFy Communications", market: "美国市场", currency: "USD" },
   taiwan: { code: "TSM", name: "Taiwan Semiconductor", market: "美国市场", currency: "USD" },
   "taiwan semiconductor": { code: "TSM", name: "Taiwan Semiconductor", market: "美国市场", currency: "USD" },
+  "20年期以上美国国债": { code: "TLT", name: "iShares 20+ Year Treasury Bond ETF", market: "美国市场", currency: "USD" },
   "20 年期以上美国国债": { code: "TLT", name: "iShares 20+ Year Treasury Bond ETF", market: "美国市场", currency: "USD" },
+  "20年期以上美国国债3": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "20 年期以上美国国债 3": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "20 年期以上美国国债 3 倍做多 etf": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "20年期以上美国国债3倍做多etf": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "20 年期以上美国国债 3 倍做多 etf direxion": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "direxion daily 20 year treasury bull 3x shares": {
+    code: "TMF",
+    name: "Direxion Daily 20+ Year Treasury Bull 3X Shares",
+    market: "美国市场",
+    currency: "USD",
+  },
+  "20 年期以上美国国债 etf": { code: "TLT", name: "iShares 20+ Year Treasury Bond ETF", market: "美国市场", currency: "USD" },
   "20 年期以上美国国债 etf ishares": {
     code: "TLT",
     name: "iShares 20+ Year Treasury Bond ETF",
@@ -413,12 +492,13 @@ const KNOWN_SECURITY_ALIASES: Record<string, SecurityAlias> = {
 };
 
 function clean(value: string) {
-  return value.replace(/\s+/g, " ").trim();
+  return value.replace(/\p{C}+/gu, " ").replace(/\s+/g, " ").trim();
 }
 
 function canonicalText(value: string) {
   return value
     .normalize("NFKC")
+    .replace(/\p{C}+/gu, " ")
     .replaceAll("⻓", "长")
     .replaceAll("⻢", "马")
     .replaceAll("⾺", "马")
@@ -1309,7 +1389,7 @@ function isStandalonePositionMoveCandidate(line: TextLine) {
     text.includes("证券转入") ||
     text.includes("证券转出") ||
     text.includes("公司行动股票") ||
-    text.includes("中签")
+    text.includes("中签新股入账")
   );
 }
 
@@ -1354,13 +1434,32 @@ function parsePositionMoveLine(
   const fromCells = positionMoveFromFields(sourcePdf, line.page, market, cellFields, documentAliases);
   if (fromCells) return fromCells;
 
+  const date = tokens[0]?.text ?? "";
+  const quantity = tokens.at(-1)?.text ?? "";
+  const noteTokenIndex = tokens.findIndex((token, index) => {
+    if (index < 2 || index >= tokens.length - 1) return false;
+    const text = canonicalText(token.text);
+    return token.x >= 340 || isPositionMoveNoteToken(text) || /^IPO\b/i.test(text) || text === "申购" || text === "赎回";
+  });
+  if (noteTokenIndex > 0) {
+    const itemTokenIndex = tokens.findIndex((token, index) => {
+      if (index <= 1 || index >= noteTokenIndex) return false;
+      return token.x >= 110 && Boolean(clean(canonicalText(token.text)));
+    });
+    if (itemTokenIndex > 0) {
+      const moveType = clean(tokens.slice(1, itemTokenIndex).map((token) => token.text).join(" "));
+      const item = clean(tokens.slice(itemTokenIndex, noteTokenIndex).map((token) => token.text).join(" "));
+      const note = clean(tokens.slice(noteTokenIndex, tokens.length - 1).map((token) => token.text).join(" "));
+      const fromNameItem = positionMoveFromFields(sourcePdf, line.page, market, { date, moveType, item, note, quantity }, documentAliases);
+      if (fromNameItem) return fromNameItem;
+    }
+  }
+
   const codeIndex = tokens.findIndex((token, index) => {
     if (index < 2 || token.x > 380) return false;
     return isPositionMoveSecurityToken(token.text);
   });
   if (codeIndex < 2) return null;
-  const date = tokens[0]?.text ?? "";
-  const quantity = tokens.at(-1)?.text ?? "";
 
   const noteStartIndex = tokens.findIndex((token, index) => {
     if (index <= codeIndex || index >= tokens.length - 1) return false;
@@ -2359,17 +2458,17 @@ function buildRealizedTrades(
       events.push({
         kind: "acquire",
         date: normalizeDate(move.date),
-        rank: 1,
-        sequence,
-        market: move.market,
-        currency: "HKD",
-        code: move.code,
-        name: move.name,
-        quantity: move.quantity,
-        cost: ipoCostByCode.get(move.code) ?? 0,
-        source: "IPO中签扣款+申购手续费",
-        note: move.note,
-      });
+                rank: 1,
+                sequence,
+                market: move.market,
+                currency: "HKD",
+                code: move.code,
+                name: move.name,
+                quantity: move.quantity,
+                cost: ipoCostByCode.get(normalizeCode(move.code)) ?? 0,
+                source: "IPO中签扣款+申购手续费",
+                note: move.note,
+              });
       sequence += 1;
     } else if (isTransferInMove(move)) {
       const position = portfolioLookup.get(`${move.sourcePdf}::${move.code}`);

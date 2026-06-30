@@ -7,6 +7,7 @@ import {
   ArrowRight,
   ArrowUpDown,
   Calculator,
+  CalendarDays,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -301,7 +302,19 @@ function rowHasRmbPnl(row) {
 }
 
 function rowNeedsCost(row) {
-  return Boolean(row?.missingCost || (row?.positionOnly && !rowHasRmbPnl(row)));
+  if (row?.missingCost) return true;
+  if (!row?.positionOnly) return false;
+  if (row.positionCostStatus) return row.positionCostStatus === "missing";
+  return !rowHasRmbPnl(row);
+}
+
+function positionOnlyOriginalPnlLabel(row) {
+  if (Number.isFinite(row?.pnlOriginal)) return floatingPnlLabel(row.pnlOriginal);
+  if (Number.isFinite(row?.proceeds)) return `市值 ${fmt(row.proceeds)}`;
+  if (Number.isFinite(row?.quantity)) {
+    return `${row.quantity < 0 ? "空头持仓" : "持仓"} ${fmtQuantity(row.quantity)} 股`;
+  }
+  return "期末持仓";
 }
 
 function securityAliasStateKey(row) {
@@ -478,6 +491,58 @@ function rowsFromAnalysis(analysis) {
     existing.positions.push(position);
     positionMap.set(baseKey, existing);
   }
+
+  const latestFlowByKey = new Map();
+  for (const flow of buildTradeFlowRows(analysis.tradeActivities ?? [], analysis.realizedTrades ?? []).sort(compareTransactionRows)) {
+    if (!flow.currency || !flow.symbol) continue;
+    latestFlowByKey.set(rowKeyFor(flow.currency, flow.symbol), flow);
+  }
+
+  for (const [baseKey, flow] of latestFlowByKey.entries()) {
+    if (positionMap.has(baseKey)) continue;
+    const quantity = Number(flow.currentQuantity);
+    if (!Number.isFinite(quantity) || Math.abs(quantity) <= FLOW_REPLAY_EPSILON) continue;
+
+    const averageCost = Number(flow.currentAverageCost);
+    const hasAverageCost = Number.isFinite(averageCost);
+    const costBasis = hasAverageCost ? Math.abs(quantity) * averageCost : null;
+    const inferredPosition = {
+      id: `${flow.activityId ?? flow.id}-inferred-open-position`,
+      broker: flow.broker,
+      asOf: flow.date ? `${flow.date} 后` : "",
+      market: flow.market,
+      currency: flow.currency,
+      symbol: flow.symbol,
+      securityName: flow.securityName,
+      quantity,
+      marketValue: null,
+      costBasis,
+      source: "成交流水推算期末持仓",
+      note: "当前材料未形成已实现盈亏，系统按成交流水重放后仍有未卖出股数；该行仅用于核对，不参与本期已实现盈亏计算。",
+    };
+
+    const key = `${baseKey}::activity-position`;
+    positionMap.set(baseKey, {
+      key,
+      broker: flow.broker,
+      brokers: flow.broker ? [flow.broker] : [],
+      market: flow.market,
+      code: flow.symbol,
+      name: flow.securityName,
+      currency: flow.currency,
+      quantity,
+      proceeds: null,
+      costBasis,
+      pnlOriginal: null,
+      rmb: null,
+      positionOnly: true,
+      positionCostStatus: hasAverageCost ? "reported" : "missing",
+      inferredFromActivities: true,
+      positions: [inferredPosition],
+      transactions: [],
+    });
+  }
+
   const positionRows = Array.from(positionMap.values()).filter(Boolean);
   return [...Array.from(rowMap.values()), ...positionRows];
 }
@@ -1040,6 +1105,22 @@ function coverageMonths(year, files, tradeActivities, dividends, realizedTrades,
     const month = String(index + 1).padStart(2, "0");
     return [month, activeMonths.has(month) ? "ok" : "gap"];
   });
+}
+
+function paddedMonthValue(year, month) {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function monthValueFromDate(value) {
+  const match = String(value ?? "").match(/^(\d{4})-(0[1-9]|1[0-2])/);
+  return match ? `${match[1]}-${match[2]}` : "";
+}
+
+function isDateInMonthRange(value, startMonth, endMonth) {
+  if (!startMonth && !endMonth) return true;
+  const month = monthValueFromDate(value);
+  if (!month) return false;
+  return (!startMonth || month >= startMonth) && (!endMonth || month <= endMonth);
 }
 
 function methodReportFromAnalysis(analysis, fx = FX) {
@@ -2373,9 +2454,7 @@ function PnlTable({
                           ? cnSigned(row.pnlOriginal)
                           : `卖出收入 ${fmt(row.proceeds)}`
                         : row.positionOnly
-                          ? row.pnlOriginal === null
-                            ? `市值 ${fmt(row.proceeds)}`
-                            : floatingPnlLabel(row.pnlOriginal)
+                          ? positionOnlyOriginalPnlLabel(row)
                           : cnSigned(row.pnlOriginal)}
                     </td>
                     <td className="r num muted">{(fx[row.market] ?? 1).toFixed(4)}</td>
@@ -2986,7 +3065,9 @@ function PnlDetailRow({
   if (row.positionOnly) {
     const positionCostRecordNote = missingPositionCostRecords.length
       ? `其中 ${missingPositionCostRecords.length} 条期末持仓没有读取到成本，下面已标出具体来源记录；如果这些股数来自买入或转仓，需要补对应成本。`
-      : "下面已标出每条期末持仓的成本来源；这些记录只用于核对持仓，不参与本期已实现盈亏。";
+      : row.inferredFromActivities
+        ? "该行由成交流水推算得出，当前材料未读取到券商期末持仓估值；仅用于核对未卖出股数，不参与本期已实现盈亏。"
+        : "下面已标出每条期末持仓的成本来源；这些记录只用于核对持仓，不参与本期已实现盈亏。";
     return (
       <tr className="detail-row">
         <td colSpan="7">
@@ -3488,21 +3569,47 @@ function HoldingsPage({
   onClearCostCorrection,
   analysisStatus,
 }) {
+  const fullYearStartMonth = paddedMonthValue(year, 1);
+  const fullYearEndMonth = paddedMonthValue(year, 12);
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("all");
   const [side, setSide] = useState("all");
+  const [flowMonthStart, setFlowMonthStart] = useState(fullYearStartMonth);
+  const [flowMonthEnd, setFlowMonthEnd] = useState(fullYearEndMonth);
   const [positionSort, setPositionSort] = useState("code-asc");
   const [flowSort, setFlowSort] = useState("code-asc");
   const [showPositions, setShowPositions] = useState(false);
   const [editingFlowCostKey, setEditingFlowCostKey] = useState(null);
   const [flowCostDraft, setFlowCostDraft] = useState("");
   const [flowCostMode, setFlowCostMode] = useState("unit");
+  const isFullYearFlowRange = flowMonthStart === fullYearStartMonth && flowMonthEnd === fullYearEndMonth;
   const positionSortConfig = parseSortValue(positionSort);
   const flowSortConfig = parseSortValue(flowSort);
   const months = useMemo(
     () => coverageMonths(year, files, tradeActivities, dividends, realizedTrades, openPositions),
     [dividends, files, openPositions, realizedTrades, tradeActivities, year],
   );
+
+  useEffect(() => {
+    setFlowMonthStart(fullYearStartMonth);
+    setFlowMonthEnd(fullYearEndMonth);
+  }, [fullYearEndMonth, fullYearStartMonth]);
+
+  function handleFlowMonthStartChange(value) {
+    setFlowMonthStart(value);
+    if (value && flowMonthEnd && value > flowMonthEnd) setFlowMonthEnd(value);
+  }
+
+  function handleFlowMonthEndChange(value) {
+    setFlowMonthEnd(value);
+    if (value && flowMonthStart && value < flowMonthStart) setFlowMonthStart(value);
+  }
+
+  function resetFlowMonthRange() {
+    setFlowMonthStart(fullYearStartMonth);
+    setFlowMonthEnd(fullYearEndMonth);
+  }
+
   const flows = useMemo(() => buildTradeFlowRows(tradeActivities, realizedTrades, costCorrections), [costCorrections, realizedTrades, tradeActivities]);
   const positions = useMemo(() => buildOpenPositionRows(openPositions, fx), [fx, openPositions]);
   const sortedPositions = useMemo(() => {
@@ -3516,11 +3623,12 @@ function HoldingsPage({
       const okQuery = matchesSearchQuery(flow.query, query);
       const okMarket = market === "all" || flow.market === market;
       const okSide = side === "all" || flow.sideFilter === side;
-      return okQuery && okMarket && okSide;
+      const okMonth = isDateInMonthRange(flow.date, flowMonthStart, flowMonthEnd);
+      return okQuery && okMarket && okSide && okMonth;
     });
     const sort = parseSortValue(flowSort);
     return [...matched].sort((a, b) => compareFlowsBySort(a, b, sort));
-  }, [flowSort, flows, market, query, side]);
+  }, [flowMonthEnd, flowMonthStart, flowSort, flows, market, query, side]);
 
   return (
     <main className="wrap">
@@ -3658,6 +3766,39 @@ function HoldingsPage({
             ]}
             onChange={setSide}
           />
+          <div className="month-range" aria-label="成交年月筛选">
+            <CalendarDays />
+            <label>
+              <span>起始</span>
+              <input
+                type="month"
+                value={flowMonthStart}
+                onChange={(event) => handleFlowMonthStartChange(event.target.value)}
+                aria-label="起始成交年月"
+              />
+            </label>
+            <span className="month-range-sep">至</span>
+            <label>
+              <span>结束</span>
+              <input
+                type="month"
+                value={flowMonthEnd}
+                onChange={(event) => handleFlowMonthEndChange(event.target.value)}
+                aria-label="结束成交年月"
+              />
+            </label>
+            <button
+              className="month-reset"
+              type="button"
+              title={`恢复 ${year} 全年`}
+              aria-label={`恢复 ${year} 全年`}
+              disabled={isFullYearFlowRange}
+              onClick={resetFlowMonthRange}
+            >
+              <RotateCcw />
+              全年
+            </button>
+          </div>
           <Segmented
             value={flowSort}
             options={[
@@ -3670,7 +3811,7 @@ function HoldingsPage({
           />
           <div className="tool-spacer" />
           <span className="tcount">
-            显示 <b>{filteredFlows.length}</b> 笔
+            显示 <b>{filteredFlows.length}</b> / {flows.length} 笔
           </span>
         </div>
         <div className="tbl-wrap">
