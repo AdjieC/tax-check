@@ -1329,6 +1329,15 @@ function isCurrencySummaryItem(value: string) {
 
 function inferCashFlowCurrency(fields: CashFlowFields, fallback: Currency) {
   const text = canonicalText(`${fields.flowType} ${fields.note}`).toUpperCase();
+  // 港股现金分红备注会同时出现申报币(如 RMB1.425/SH)和实际付款币(PAY IN APPROX.HKD…),
+  // 入账金额以付款币为准,需优先识别 “PAY IN …” 指明的币种。
+  const payIn = text.match(/PAY IN\s+(?:APPROX\.?\s*)?(HKD|USD|CNY|RMB|SGD)/)?.[1];
+  if (payIn) return payIn === "RMB" ? "CNY" : (payIn as Currency);
+  // 现金分红/公司行动等带证券的现金流:直接按备注里的证券所属市场判定结算币种。
+  // 这样可避免两类误判:(1)分组“币种:美元”表头跨页未重复导致回退默认港元(如 TSM 派息);
+  // (2)港股备注里 RMB/USD 仅为每股申报口径(如 RMB1.425/SH)且常被换行截断,不能据此改判。
+  if (hkSymbolFromNote(fields.note)) return "HKD";
+  if (usSymbolFromNote(fields.note)) return "USD";
   if (text.includes("USD") || text.includes("美元")) return "USD";
   if (text.includes("CNY") || text.includes("RMB") || text.includes("人民币")) return "CNY";
   if (text.includes("HKD") || text.includes("港币")) return "HKD";
@@ -1778,16 +1787,40 @@ function extractIpoCode(note: string) {
 
 const US_SECURITY_NOTE_RE = /\b([A-Z]{1,5})(?:\.US|\([A-Z]{2}[A-Z0-9]{8,12}\))/i;
 const US_DIVIDEND_NOTE_RE = /\b([A-Z]{1,5})(?:\.US|\([A-Z]{2}[A-Z0-9]{8,12}\))\s+Cash Dividend/i;
+// 港股公司行动备注形如 “#2648.HK Anjoy Food …” / “Handling Fee 02648.HK …”，代码统一补零到 5 位。
+const HK_SECURITY_NOTE_RE = /\b0*(\d{4,5})\.HK\b/i;
+
+function hkSymbolFromNote(note: string) {
+  const match = canonicalText(note).match(HK_SECURITY_NOTE_RE);
+  return match ? displayCode(match[1]) : null;
+}
+
+function round2(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+// 港股(H股)现金分红备注形如 “RMB1.425/SH(-10%)”,表示已在源头按 10% 预扣所得税,入账金额为
+// 税后净额(常伴随 “(NET)”,但可能因换行被截断)。返回预扣率(0~1),无此标记返回 null。
+function dividendNetWithholdingRate(note: string): number | null {
+  const match = canonicalText(note).match(/\(\s*-\s*(\d+(?:\.\d+)?)\s*%\s*\)/);
+  if (!match) return null;
+  const pct = Number(match[1]);
+  return Number.isFinite(pct) && pct > 0 && pct < 100 ? pct / 100 : null;
+}
 
 function dividendSymbolFromNote(note: string) {
-  return canonicalText(note).match(US_DIVIDEND_NOTE_RE)?.[1].toUpperCase() ?? null;
+  return canonicalText(note).match(US_DIVIDEND_NOTE_RE)?.[1].toUpperCase() ?? hkSymbolFromNote(note);
 }
 
 function usSymbolFromNote(note: string) {
   return canonicalText(note).match(US_SECURITY_NOTE_RE)?.[1].toUpperCase() ?? null;
 }
 
-function isUsDividendCashFlow(cashFlow: CashFlowRecord) {
+function securitySymbolFromNote(note: string) {
+  return usSymbolFromNote(note) ?? hkSymbolFromNote(note);
+}
+
+function isDividendCashFlow(cashFlow: CashFlowRecord) {
   const flowType = canonicalText(cashFlow.flowType).toLowerCase();
   const note = canonicalText(cashFlow.note).toLowerCase();
   const isDividend = flowType.includes("分红") || flowType.includes("cash dividend") || note.includes("cash dividend");
@@ -1807,7 +1840,7 @@ async function attachDividendScreenshots(
   password: string | undefined,
   cashFlows: CashFlowRecord[],
 ) {
-  const targets = cashFlows.filter((cashFlow) => cashFlow.sourcePdf === fileName && cashFlow.evidence && isUsDividendCashFlow(cashFlow));
+  const targets = cashFlows.filter((cashFlow) => cashFlow.sourcePdf === fileName && cashFlow.evidence && isDividendCashFlow(cashFlow));
   if (targets.length === 0 || typeof document === "undefined") return;
 
   try {
@@ -1919,7 +1952,7 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
   for (const cashFlow of cashFlows) {
     const flowType = canonicalText(cashFlow.flowType);
     const note = canonicalText(cashFlow.note);
-    const dividendSymbol = dividendSymbolFromNote(cashFlow.note) ?? singleSymbolForDate(cashFlow.date);
+    const dividendSymbol = securitySymbolFromNote(cashFlow.note) ?? singleSymbolForDate(cashFlow.date);
     const lowerFlowType = flowType.toLowerCase();
     const lowerNote = note.toLowerCase();
     if (
@@ -1929,6 +1962,14 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
     ) {
       const symbol = dividendSymbol;
       const key = `${cashFlow.date}-${symbol}`;
+      // 港股(H股)分红入账为税后净额(备注含 “(-10%)”),按预扣率反算税前总额与已预扣税,
+      // 使境外税收抵免按真实税前口径计算。仅命中长桥港股此类备注,不影响其它分红/券商。
+      const netWithholdingRate = dividendNetWithholdingRate(cashFlow.note);
+      const impliedWithheld =
+        netWithholdingRate !== null
+          ? round2(cashFlow.amount * (netWithholdingRate / (1 - netWithholdingRate)))
+          : 0;
+      const grossAmount = round2(cashFlow.amount + impliedWithheld);
       dividends.push({
         id: `${cashFlow.sourcePdf}-dividend-${symbol}-${cashFlow.date}`,
         broker: "长桥",
@@ -1936,11 +1977,16 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
         currency: cashFlow.currency,
         symbol,
         securityName: symbol,
-        grossAmount: cashFlow.amount,
-        taxWithheld: pendingWithholding.get(key) ?? 0,
+        grossAmount,
+        taxWithheld: round2((pendingWithholding.get(key) ?? 0) + impliedWithheld),
         fee: pendingFees.get(key) ?? 0,
         source: cashFlow.sourcePdf,
-        note: cashFlow.note,
+        note:
+          netWithholdingRate !== null
+            ? `${cashFlow.note}（已按 -${round2(netWithholdingRate * 100)}% 预扣由税后净额 ${round2(
+                cashFlow.amount,
+              )} 还原税前 ${grossAmount}，预扣税 ${impliedWithheld}）`
+            : cashFlow.note,
         evidence: cashFlow.evidence
           ? {
               page: cashFlow.evidence.page,
@@ -1954,8 +2000,8 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
       continue;
     }
 
-    if (flowType.includes("公司行动") && note.includes("Handling Fee")) {
-      const symbol = usSymbolFromNote(cashFlow.note);
+    if (flowType.includes("公司行动") && (note.includes("Handling Fee") || note.includes("Scrip Fee"))) {
+      const symbol = securitySymbolFromNote(cashFlow.note);
       if (!symbol) continue;
       const key = `${cashFlow.date}-${symbol}`;
       const existing = dividends.find((dividend) => dividend.date === normalizeDate(cashFlow.date) && dividend.symbol === symbol);
@@ -1967,12 +2013,15 @@ function buildDividends(cashFlows: CashFlowRecord[]): DividendIncome[] {
       continue;
     }
 
-    if (
-      note.includes("Withholding Tax/Dividend Fee") ||
-      lowerFlowType.includes("withholding tax/dividend fee") ||
-      (flowType.includes("公司行动其他费用") && note.includes("Cash Dividend"))
-    ) {
-      const symbol = dividendSymbolFromNote(cashFlow.note) ?? singleSymbolForDate(cashFlow.date);
+    // 分红预扣税:除显式的 “Withholding Tax/Dividend Fee” 外,长桥对 “Payment in Lieu of Dividend”
+    // 等较长备注会换行截断,丢掉该标记。故对“公司行动”类负数费用、且备注提及 dividend/分红的,
+    // 一并按预扣税归集(手续费/代收股息费已在上一分支用 continue 排除)。
+    const isExplicitWithholding =
+      note.includes("Withholding Tax/Dividend Fee") || lowerFlowType.includes("withholding tax/dividend fee");
+    const isDividendCompanyActionFee =
+      flowType.includes("公司行动") && cashFlow.amount < 0 && /dividend|分红/i.test(note);
+    if (isExplicitWithholding || isDividendCompanyActionFee) {
+      const symbol = securitySymbolFromNote(cashFlow.note) ?? singleSymbolForDate(cashFlow.date);
       if (!symbol) continue;
       const key = `${cashFlow.date}-${symbol}`;
       const existing = dividends.find((dividend) => dividend.date === normalizeDate(cashFlow.date) && dividend.symbol === symbol);

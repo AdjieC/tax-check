@@ -965,16 +965,33 @@ export function analyzeTaxInput(
     };
   });
 
-  const dividendGrossRmb = input.dividends.reduce(
-    (sum, dividend) => sum + toRmb(dividend.grossAmount, dividend.currency, config),
-    0,
-  ) + activeSummaries.reduce((sum, summary) => sum + toRmb(summary.cashDividends + (summary.interest ?? 0), summary.currency, config), 0);
-  const withholdingCreditRmb = input.dividends.reduce(
-    (sum, dividend) => sum + toRmb(dividend.taxWithheld, dividend.currency, config),
-    0,
-  ) + activeSummaries.reduce((sum, summary) => sum + toRmb(Math.abs(summary.dividendTaxWithheld), summary.currency, config), 0);
-  const dividendTaxBeforeCredit = dividendGrossRmb * config.taxRate;
-  const dividendEstimatedTaxRmb = Math.max(dividendTaxBeforeCredit - withholdingCreditRmb, 0);
+  // 境外所得税收抵免按“逐笔封顶”计算:每一笔股息/红利的可抵免额不超过该笔按境内税率(20%)
+  // 计算的应纳税额。即境外预扣税率≥20%时(如台湾 TSM 预扣 21%)该笔应补 0,且其超出 20% 的
+  // 部分不会被用来抵消其它分红的应纳税额(避免“全局池化”导致整体少缴)。
+  let dividendGrossRmb = 0;
+  let withholdingCreditRmb = 0; // 逐笔封顶后实际可抵免额
+  let dividendEstimatedTaxRmb = 0;
+  const accrueDividendIncome = (grossRmbRaw: number, withheldRmbRaw: number) => {
+    const grossRmb = Math.max(grossRmbRaw, 0);
+    const withheldRmb = Math.max(withheldRmbRaw, 0);
+    const taxBeforeCredit = grossRmb * config.taxRate;
+    const creditApplied = Math.min(withheldRmb, taxBeforeCredit);
+    dividendGrossRmb += grossRmbRaw;
+    withholdingCreditRmb += creditApplied;
+    dividendEstimatedTaxRmb += Math.max(taxBeforeCredit - withheldRmb, 0);
+  };
+  for (const dividend of input.dividends) {
+    accrueDividendIncome(
+      toRmb(dividend.grossAmount, dividend.currency, config),
+      toRmb(dividend.taxWithheld, dividend.currency, config),
+    );
+  }
+  for (const summary of activeSummaries) {
+    accrueDividendIncome(
+      toRmb(summary.cashDividends + (summary.interest ?? 0), summary.currency, config),
+      toRmb(Math.abs(summary.dividendTaxWithheld), summary.currency, config),
+    );
+  }
 
   return {
     config,

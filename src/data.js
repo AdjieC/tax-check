@@ -10,6 +10,8 @@ export const FX_BY_YEAR = Object.fromEntries(
       US: item.fxRates.USD,
       date: item.date,
       source: item.source,
+      basisLabel: item.provisional ? "临时中间价" : "年末中间价",
+      scopeLabel: item.provisional ? "临时折算口径" : "年末口径",
     },
   ]),
 );

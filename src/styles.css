@@ -1564,6 +1564,49 @@ tfoot .num {
   font-size: 14px;
 }
 
+.pnl-summary-bar {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-2);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.pnl-summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.pnl-summary-item span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pnl-summary-item b {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 tbody tr.stock-row {
   cursor: pointer;
 }
@@ -2834,20 +2877,20 @@ h2.sh .idx {
 }
 
 .report-dividend-table .col-market {
-  width: 12%;
+  width: 10%;
 }
 
 .report-dividend-table .col-security {
-  width: 28%;
+  width: 24%;
 }
 
 .report-dividend-table .col-amount,
 .report-dividend-table .col-tax {
-  width: 16%;
+  width: 15%;
 }
 
 .report-dividend-table .col-rmb {
-  width: 14%;
+  width: 12%;
 }
 
 .report-dividend-table th,
@@ -2890,7 +2933,7 @@ h2.sh .idx {
 
 .foreign-credit-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -3547,6 +3590,10 @@ h2.sh .idx {
   .topbar-publisher {
     font-size: 12px;
   }
+
+  .pnl-summary-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -3668,6 +3715,10 @@ h2.sh .idx {
   }
 
   .stock-flow-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .pnl-summary-bar {
     grid-template-columns: 1fr;
   }
 

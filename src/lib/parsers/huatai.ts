@@ -312,6 +312,12 @@ function isMovementStart(text: string) {
   );
 }
 
+function hasEmbeddedMovementStart(text: string) {
+  return /\b[A-Z0-9]{6,16}\s+20\d{2}-\d{2}-\d{2}(?:\s+20\d{2}-\d{2}-\d{2})?\s+(资金存入|资金提取|现金存款|现金提款|产品存入|现货存入|产品提取|现货提取|买卖交易)\b/.test(
+    canonicalText(text),
+  );
+}
+
 function isSectionOrHeader(text: string) {
   const normalized = canonicalText(text);
   return (
@@ -334,6 +340,7 @@ function movementContext(lines: TextLine[], index: number) {
     const next = canonicalText(lines[index + offset].text);
     if (!next) continue;
     if (isMovementStart(next) || TRADE_LINE_PATTERN.test(next) || BROKEN_TRADE_LINE_PATTERN.test(next) || isSectionOrHeader(next)) break;
+    if (hasEmbeddedMovementStart(next)) break;
     parts.push(next);
   }
   return clean(parts.join(" "));
@@ -345,6 +352,7 @@ function tradeContinuationText(lines: TextLine[], index: number) {
     const next = canonicalText(lines[index + offset].text);
     if (!next) continue;
     if (TRADE_LINE_PATTERN.test(next) || BROKEN_TRADE_LINE_PATTERN.test(next) || isMovementStart(next) || isSectionOrHeader(next)) break;
+    if (hasEmbeddedMovementStart(next)) break;
     parts.push(next);
   }
   return clean(parts.join(" "));
@@ -461,6 +469,18 @@ function parseMovementAmount(remainder: string) {
   return null;
 }
 
+function inferMovementCurrency(remainder: string, activeCurrency: Currency): Currency {
+  const text = canonicalText(remainder).toUpperCase();
+  const explicitCurrency = text.match(/\b(?:CASH DIVIDEND|DIVIDEND|DIVIDEND\/CASH|US DIVIDEND TAX|DIVIDEND CHARGES|DIVIDEND COLLECTION FEE)\b.*\b(USD|HKD|CNY)\b/)?.[1];
+  if (explicitCurrency === "USD" || explicitCurrency === "HKD" || explicitCurrency === "CNY") return explicitCurrency;
+  if (/\b[A-Z]{1,8}:US\b/.test(text)) return "USD";
+  if (/\b(?:\d{5}|[A-Z]{1,8}):HK\b/.test(text)) return "HKD";
+  if (/\bUSD\b|美元/.test(text)) return "USD";
+  if (/\bCNY\b|人民币/.test(text)) return "CNY";
+  if (/\bHKD\b|港币/.test(text)) return "HKD";
+  return activeCurrency;
+}
+
 function parseMovementLine(sourcePdf: string, lines: TextLine[], index: number, activeCurrency: Currency): AccountMovementRecord | null {
   const line = lines[index];
   const text = canonicalText(line.text);
@@ -478,7 +498,7 @@ function parseMovementLine(sourcePdf: string, lines: TextLine[], index: number, 
     tradeDate: match[3] ? normalizeDate(match[3]) : undefined,
     date: normalizeDate(match[3] ?? match[2]),
     type: match[4],
-    currency: activeCurrency,
+    currency: inferMovementCurrency(match[5], activeCurrency),
     amount: parseMovementAmount(match[5]),
     text: context,
   };
@@ -842,6 +862,7 @@ function buildCashDividends(movements: AccountMovementRecord[]) {
   >();
 
   for (const movement of movements) {
+    if (!["资金存入", "资金提取", "现金存款", "现金提款"].includes(movement.type)) continue;
     const text = canonicalText(movement.text);
     const isCashDividend = text.includes("Dividend/Cash");
     const isDividendTax = text.includes("US DIVIDEND TAX");
