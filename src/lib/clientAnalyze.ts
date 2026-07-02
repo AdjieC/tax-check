@@ -4,6 +4,7 @@ import {
   mergeParsedInputs,
 } from "@/lib/tax/calculator";
 import { taxConfigForYear } from "@/lib/tax/config";
+import { parseChiefPdfs } from "@/lib/parsers/chief";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
 import { parseHuashengWorkbooks } from "@/lib/parsers/huasheng";
@@ -22,6 +23,7 @@ export type BrokerId =
   | "longbridge"
   | "panda"
   | "cmbWingLung"
+  | "chief"
   | "tiger"
   | "zircon"
   | "usmart"
@@ -146,6 +148,7 @@ export async function analyzeUploadedFiles(options: {
   const longbridgeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const pandaFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const cmbWingLungFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const chiefFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const tigerFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const zirconFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const usmartFiles: Array<{ name: string; data: ArrayBuffer }> = [];
@@ -185,6 +188,11 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为招商永隆，但招商永隆解析器只接受 PDF 全年收入报告或证券账户月结单。`, file.name);
       }
       cmbWingLungFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else if (entry.broker === "chief") {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为致富，但致富解析器只接受 PDF 月结单。`, file.name);
+      }
+      chiefFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "tiger") {
       if (!lower.endsWith(".pdf")) {
         throw new ParserValidationError(`${file.name} 被标记为老虎，但老虎解析器只接受 PDF 税表或活动报表。`, file.name);
@@ -192,7 +200,10 @@ export async function analyzeUploadedFiles(options: {
       tigerFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "ibkr") {
       if (!lower.endsWith(".pdf")) {
-        throw new ParserValidationError(`${file.name} 被标记为 IBKR，但 IBKR 解析器只接受 PDF Activity Statement / 活动账单。`, file.name);
+        throw new ParserValidationError(
+          `${file.name} 被标记为 IBKR，但 IBKR 解析器只接受 PDF Activity Statement / 活动账单或 Form 1042-S 税表。`,
+          file.name,
+        );
       }
       ibkrFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "zircon") {
@@ -259,6 +270,20 @@ export async function analyzeUploadedFiles(options: {
   }
   if (cmbWingLungFiles.length > 0) {
     const parsed = await parseCmbWingLungPdfs(cmbWingLungFiles, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
+  }
+  if (chiefFiles.length > 0) {
+    if (!options.password?.trim()) {
+      throw new ParserValidationError("检测到致富 PDF 月结单，请先填写致富 PDF 密码后再解析。");
+    }
+    const parsed = await parseChiefPdfs(chiefFiles, options.password, {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
     });

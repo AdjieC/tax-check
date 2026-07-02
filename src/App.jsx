@@ -1298,7 +1298,7 @@ function costCorrectionInputsFromState(costCorrections) {
     .filter((item) => item.costBasis !== null);
 }
 
-const PASSWORD_REQUIRED_PDF_BROKERS = new Set(["longbridge", "panda", "zircon"]);
+const PASSWORD_REQUIRED_PDF_BROKERS = new Set(["longbridge", "panda", "zircon", "chief"]);
 
 function hasPendingBrokerDetection(files) {
   return files.some((file) => file.file && file.brokerConfidence === "pending" && /\.pdf$/i.test(file.name));
@@ -1351,6 +1351,7 @@ function brokerLabel(broker) {
   if (broker === "longbridge") return "长桥";
   if (broker === "panda") return "熊猫";
   if (broker === "cmbWingLung") return "招商永隆";
+  if (broker === "chief") return "致富";
   if (broker === "zircon") return "卓锐";
   if (broker === "usmart") return "盈立";
   return "富途";
@@ -1363,6 +1364,7 @@ const BROKER_OPTIONS = [
   { value: "longbridge", label: "长桥" },
   { value: "panda", label: "熊猫" },
   { value: "cmbWingLung", label: "招商永隆" },
+  { value: "chief", label: "致富" },
   { value: "zircon", label: "卓锐" },
   { value: "usmart", label: "盈立" },
   { value: "tiger", label: "老虎" },
@@ -1424,9 +1426,19 @@ const LONGBRIDGE_STOCK_LEDGER_HEADERS = ["编号", "业务时间", "账户类型
 const TIGER_TEXT_MARKERS = ["Tiger Brokers", "Tiger Brokers (NZ)", "活动报表", "Tax Form Record", "Key Tax Figures"];
 const PANDA_TEXT_MARKERS = ["熊猫证券", "熊貓證券", "Panda Securities", "fafa.hk", "cs@fafa.hk", "BNC380"];
 const CMB_WING_LUNG_TEXT_MARKERS = ["招商永隆", "招商永隆銀行", "招商永隆银行", "CMB Wing Lung", "Annual Income Report", "全年收入報告", "全年收入报告"];
+const CHIEF_TEXT_MARKERS = ["致富证券", "致富證券", "Chief Securities", "chiefgroup.com.hk", "BWN872"];
 const ZIRCON_TEXT_MARKERS = ["卓锐", "卓銳", "Zircon Securities"];
 const USMART_TEXT_MARKERS = ["盈立", "盈立證券", "盈立证券", "uSmart Securities", "usmarthk.com", "usmartsecurities.com"];
-const IBKR_TEXT_MARKERS = ["Interactive Brokers", "Interactive Brokers LLC", "IBKR", "盈透", "活动账单", "Activity Statement"];
+const IBKR_TEXT_MARKERS = [
+  "Interactive Brokers",
+  "Interactive Brokers LLC",
+  "IBKR",
+  "盈透",
+  "活动账单",
+  "Activity Statement",
+  "Form 1042-S",
+  "UNIQUE FORM IDENTIFIER",
+];
 
 function brokerConfidenceLabel(confidence) {
   if (confidence === "manual") return "手动选择";
@@ -1630,6 +1642,13 @@ function baseBrokerGuess(fileName) {
       reason: "文件名包含招商永隆/CMB Wing Lung 特征，已默认选择招商永隆。",
     };
   }
+  if (fileName.includes("致富") || fileName.includes("致富證券") || lower.includes("chief securities") || lower.includes("chiefgroup")) {
+    return {
+      broker: "chief",
+      confidence: "high",
+      reason: "文件名包含致富/Chief Securities 特征，已默认选择致富。",
+    };
+  }
   if (fileName.includes("卓锐") || fileName.includes("卓銳") || lower.includes("zircon")) {
     return {
       broker: "zircon",
@@ -1662,7 +1681,7 @@ function baseBrokerGuess(fileName) {
     return {
       broker: "longbridge",
       confidence: "medium",
-      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、招商永隆、卓锐、盈立、老虎或 IBKR 报表，请确认券商选择。",
+      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、招商永隆、致富、卓锐、盈立、老虎或 IBKR 报表，请确认券商选择。",
     };
   }
   if (isExcelFile(fileName)) {
@@ -1804,6 +1823,13 @@ async function detectBrokerFromFile(file, password) {
           reason: "文件内容包含招商永隆特征；当前招商永隆解析器支持 PDF 全年收入报告和证券账户月结单。",
         };
       }
+      if (hasAnyMarker(preview, CHIEF_TEXT_MARKERS)) {
+        return {
+          broker: "chief",
+          confidence: "medium",
+          reason: "文件内容包含致富/Chief Securities 特征；当前致富解析器支持 PDF 月结单，请解析前确认文件格式。",
+        };
+      }
       if (hasAnyMarker(preview, LONGBRIDGE_TEXT_MARKERS)) {
         return {
           broker: "longbridge",
@@ -1836,7 +1862,7 @@ async function detectBrokerFromFile(file, password) {
         return {
           broker: "ibkr",
           confidence: "medium",
-          reason: "文件内容包含 IBKR/盈透特征；当前 IBKR 解析器支持 PDF Activity Statement / 活动账单。",
+          reason: "文件内容包含 IBKR/盈透特征；当前 IBKR 解析器支持 PDF Activity Statement / 活动账单和 Form 1042-S 税表。",
         };
       }
     }
@@ -1854,7 +1880,7 @@ async function detectBrokerFromFile(file, password) {
         return {
           broker: "ibkr",
           confidence: "high",
-          reason: "PDF 内容包含 IBKR/盈透活动账单特征，已默认选择 IBKR。",
+          reason: "PDF 内容包含 IBKR/盈透报表特征，已默认选择 IBKR。",
         };
       }
       if (hasTigerReportMarkers(preview)) {
@@ -1876,6 +1902,13 @@ async function detectBrokerFromFile(file, password) {
           broker: "cmbWingLung",
           confidence: "high",
           reason: "PDF 内容包含招商永隆证券账户月结单特征，已默认选择招商永隆。",
+        };
+      }
+      if (hasAnyMarker(preview, CHIEF_TEXT_MARKERS)) {
+        return {
+          broker: "chief",
+          confidence: "high",
+          reason: "PDF 内容包含致富/Chief Securities 月结单特征，已默认选择致富。",
         };
       }
       if (hasAnyMarker(preview, PANDA_TEXT_MARKERS)) {
@@ -2434,7 +2467,7 @@ function Sidebar({
           </ul>
           <label className="field-label">
             <span>PDF 月结单密码</span>
-            <input className="plain-input" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="长桥/熊猫/卓锐/盈立 PDF 密码" />
+            <input className="plain-input" value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="长桥/熊猫/卓锐/盈立/致富 PDF 密码" />
           </label>
           <button className="btn primary full-btn" type="button" onClick={() => onAnalyze()} disabled={analysisStatus === "running"} data-tour-id="analyze-button">
             <Calculator /> {analysisStatus === "running" ? "解析中…" : "解析并计算"}
@@ -4707,7 +4740,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/卓锐/盈立 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/卓锐/盈立 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -4805,7 +4838,7 @@ function ProjectIntroModal({ onStart, onClose }) {
           <span>招商永隆 PDF 全年收入报告/月结单</span>
           <span>卓锐 PDF 月结单</span>
           <span>老虎 PDF 税表/活动报表</span>
-          <span>IBKR PDF 活动账单</span>
+          <span>IBKR PDF 活动账单 / 1042-S 税表</span>
           <span>申报数字与 PDF 底稿</span>
         </div>
         <div className="intro-actions">
@@ -5451,7 +5484,7 @@ export default function App() {
         id: "pdf-password-required",
         severity: "warning",
         title: "请填写 PDF 月结单密码",
-        detail: "检测到长桥、熊猫或卓锐 PDF 月结单需要密码。华泰月结单不需要填写这里的 PDF 密码；如果文件实际是华泰，请等待自动识别完成或手动把券商改为华泰。",
+        detail: "检测到长桥、熊猫、卓锐或致富 PDF 月结单需要密码。华泰月结单不需要填写这里的 PDF 密码；如果文件实际是华泰，请等待自动识别完成或手动把券商改为华泰。",
         action: "upload",
       });
       return;

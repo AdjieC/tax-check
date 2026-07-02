@@ -8,6 +8,7 @@ import type {
   ParsedInput,
   RealizedTrade,
   ReviewIssue,
+  TaxStatementSummary,
   TradeActivity,
 } from "@/lib/tax/types";
 
@@ -20,6 +21,10 @@ interface TextToken {
   text: string;
   x: number;
   y: number;
+}
+
+interface PageTextToken extends TextToken {
+  page: number;
 }
 
 interface TextRow {
@@ -61,9 +66,31 @@ interface IbkrTradeRow {
   rawCode: string;
 }
 
+interface Ibkr1042sEntry {
+  sourcePdf: string;
+  page: number;
+  taxYear: number;
+  uniqueId: string;
+  incomeCode: string;
+  grossIncome: number;
+  federalTaxWithheld: number;
+}
+
+type Form1042sIncomeCategory = "interest" | "dividend" | "ignored" | "unsupported";
+
 const IBKR_BROKER = "IBKR";
 const DATE_RE = /^20\d{2}-\d{2}-\d{2}$/;
 const ROW_GROUP_TOLERANCE = 8.2;
+const FORM_1042S_INTEREST_CODES = new Set(["01", "02", "03", "04", "05", "22", "29", "30", "31", "33", "51", "54"]);
+const FORM_1042S_DIVIDEND_CODES = new Set(["06", "07", "08", "34", "40", "52", "53", "56"]);
+const FORM_1042S_IGNORED_CODES = new Set(["37"]);
+const FORM_1042S_INCOME_LABELS: Record<string, string> = {
+  "01": "Interest paid by U.S. obligors-general",
+  "06": "Dividends paid by U.S. corporations-general",
+  "33": "Substitute payment-interest",
+  "34": "Substitute payment-dividends",
+  "37": "Return of capital",
+};
 
 const MONTHS: Record<string, string> = {
   一月: "01",
@@ -272,6 +299,164 @@ function parseStatementPeriod(rows: TextRow[]) {
     }
   }
   return {};
+}
+
+function pdfTokensByPage(rows: TextRow[]) {
+  const pages = new Map<number, PageTextToken[]>();
+  for (const row of rows) {
+    const pageTokens = pages.get(row.page) ?? [];
+    for (const token of row.tokens) {
+      pageTokens.push({ ...token, page: row.page });
+    }
+    pages.set(row.page, pageTokens);
+  }
+  return pages;
+}
+
+function tokenInBox(
+  tokens: PageTextToken[],
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+  predicate: (token: PageTextToken) => boolean,
+) {
+  return tokens
+    .filter((token) => token.x >= minX && token.x <= maxX && token.y >= minY && token.y <= maxY && predicate(token))
+    .sort((a, b) => b.y - a.y || a.x - b.x)[0];
+}
+
+function parse1042sUniqueId(value: string) {
+  const match = canonicalText(value).match(/((?:\d\s*){10})\s+UNIQUE FORM IDENTIFIER/i);
+  return match?.[1].replace(/\s+/g, "") ?? "";
+}
+
+function parseForm1042sEntries(rows: TextRow[], sourcePdf: string) {
+  const entries = new Map<string, Ibkr1042sEntry>();
+  for (const [page, tokens] of pdfTokensByPage(rows)) {
+    const pageText = canonicalText(tokens.map((token) => token.text).join(" "));
+    if (!pageText.includes("1042-S") || !pageText.includes("UNIQUE FORM IDENTIFIER")) continue;
+
+    const uniqueId = parse1042sUniqueId(tokens.find((token) => token.text.includes("UNIQUE FORM IDENTIFIER"))?.text ?? "");
+    const yearToken = tokenInBox(tokens, 420, 500, 720, 760, (token) => /^20\d{2}$/.test(token.text));
+    const incomeCodeToken = tokenInBox(tokens, 25, 65, 670, 685, (token) => /^\d{2}$/.test(token.text));
+    const grossIncomeToken = tokenInBox(tokens, 70, 125, 670, 685, (token) => /^\d[\d,.]*$/.test(token.text));
+    const taxWithheldToken = tokenInBox(tokens, 150, 215, 640, 655, (token) => /^\d[\d,.]*$/.test(token.text));
+    const taxYear = Number(yearToken?.text ?? "");
+
+    if (!uniqueId || !Number.isFinite(taxYear) || !incomeCodeToken || !grossIncomeToken) continue;
+
+    entries.set(uniqueId, {
+      sourcePdf,
+      page,
+      taxYear,
+      uniqueId,
+      incomeCode: incomeCodeToken.text,
+      grossIncome: roundMoney(parseNumber(grossIncomeToken.text)),
+      federalTaxWithheld: roundMoney(Math.abs(parseNumber(taxWithheldToken?.text ?? "0"))),
+    });
+  }
+
+  return Array.from(entries.values()).sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
+}
+
+function categoryFor1042sIncomeCode(code: string): Form1042sIncomeCategory {
+  if (FORM_1042S_INTEREST_CODES.has(code)) return "interest";
+  if (FORM_1042S_DIVIDEND_CODES.has(code)) return "dividend";
+  if (FORM_1042S_IGNORED_CODES.has(code)) return "ignored";
+  return "unsupported";
+}
+
+function incomeCodeLabel(code: string) {
+  return FORM_1042S_INCOME_LABELS[code] ?? `Income code ${code}`;
+}
+
+function formatMoney(value: number) {
+  return roundMoney(value).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function form1042sSummaries(fileName: string, entries: Ibkr1042sEntry[]) {
+  const byYear = new Map<number, Ibkr1042sEntry[]>();
+  for (const entry of entries) {
+    const group = byYear.get(entry.taxYear) ?? [];
+    group.push(entry);
+    byYear.set(entry.taxYear, group);
+  }
+
+  return Array.from(byYear.entries())
+    .sort(([yearA], [yearB]) => yearA - yearB)
+    .flatMap<TaxStatementSummary>(([taxYear, yearEntries]) => {
+      const countedEntries = yearEntries.filter((entry) => {
+        const category = categoryFor1042sIncomeCode(entry.incomeCode);
+        return category === "interest" || category === "dividend";
+      });
+      const interest = countedEntries
+        .filter((entry) => categoryFor1042sIncomeCode(entry.incomeCode) === "interest")
+        .reduce((sum, entry) => sum + entry.grossIncome, 0);
+      const cashDividends = countedEntries
+        .filter((entry) => categoryFor1042sIncomeCode(entry.incomeCode) === "dividend")
+        .reduce((sum, entry) => sum + entry.grossIncome, 0);
+      const dividendTaxWithheld = countedEntries.reduce((sum, entry) => sum + entry.federalTaxWithheld, 0);
+
+      if (!interest && !cashDividends && !dividendTaxWithheld) return [];
+
+      return [
+        {
+          id: `ibkr-1042s-${taxYear}-${fileName}`,
+          broker: IBKR_BROKER,
+          source: fileName,
+          currency: "USD",
+          periodStart: `${taxYear}-01-01`,
+          periodEnd: `${taxYear}-12-31`,
+          grossProceeds: 0,
+          realizedGainLoss: 0,
+          cashDividends: roundMoney(cashDividends),
+          dividendTaxWithheld: roundMoney(dividendTaxWithheld),
+          interest: roundMoney(interest),
+        },
+      ];
+    });
+}
+
+function form1042sIssue(summary: TaxStatementSummary, entries: Ibkr1042sEntry[]): ReviewIssue {
+  const ignoredEntries = entries.filter((entry) => {
+    const category = categoryFor1042sIncomeCode(entry.incomeCode);
+    return category === "ignored" || category === "unsupported";
+  });
+  const ignoredText =
+    ignoredEntries.length > 0
+      ? `未自动计入的收入代码：${ignoredEntries
+          .map((entry) => `${entry.incomeCode} ${incomeCodeLabel(entry.incomeCode)} USD ${formatMoney(entry.grossIncome)}`)
+          .join("；")}。请人工核对是否需要调整持仓成本或另行申报。`
+      : "";
+
+  return {
+    id: `${summary.id}-no-trade-detail`,
+    severity: ignoredEntries.length > 0 ? "warning" : "info",
+    title: "已解析 IBKR 1042-S 税表",
+    detail: `已读取 ${summary.source} 的 ${summary.periodStart?.slice(0, 4) ?? ""} 年 Form 1042-S：利息 USD ${formatMoney(
+      summary.interest ?? 0,
+    )}，股息 USD ${formatMoney(summary.cashDividends)}，联邦预扣税 USD ${formatMoney(
+      summary.dividendTaxWithheld,
+    )}。1042-S 只有年度汇总，没有逐笔交易或逐笔分红明细；利息和股息汇总已统计进总体数据，但明细表无法展开。${ignoredText}`,
+    source: summary.source,
+  };
+}
+
+function unsupported1042sIssue(fileName: string, entries: Ibkr1042sEntry[]): ReviewIssue {
+  const codes = entries
+    .map((entry) => `${entry.incomeCode} ${incomeCodeLabel(entry.incomeCode)} USD ${formatMoney(entry.grossIncome)}`)
+    .join("；");
+  return {
+    id: `ibkr-1042s-${fileName}-unsupported-codes`,
+    severity: "warning",
+    title: "IBKR 1042-S 暂未计入",
+    detail: `已识别 IBKR Form 1042-S，但本文件只包含当前不会自动计入的收入代码：${codes}。请人工核对是否需要调整持仓成本或另行申报。`,
+    source: fileName,
+  };
 }
 
 function parseSecurities(rows: TextRow[]) {
@@ -566,6 +751,8 @@ export async function parseIbkrPdfs(files: IbkrFileInput[]): Promise<ParsedInput
     try {
       const rows = await extractPdfRows(file.name, file.data);
       const statementDetected = isIbkrStatement(rows);
+      const form1042sEntries = parseForm1042sEntries(rows, file.name);
+      const taxSummaries = form1042sSummaries(file.name, form1042sEntries);
       const period = parseStatementPeriod(rows);
       const securities = parseSecurities(rows);
       const trades = parseTrades(rows, securities).map((trade) => ({ ...trade, sourcePdf: file.name }));
@@ -579,9 +766,19 @@ export async function parseIbkrPdfs(files: IbkrFileInput[]): Promise<ParsedInput
       });
       parsed.dividends.push(...dividends);
       parsed.openPositions.push(...positions);
+      parsed.taxStatementSummaries.push(...taxSummaries);
+
+      for (const summary of taxSummaries) {
+        const taxYear = Number(summary.periodStart?.slice(0, 4));
+        parsed.issues.push(form1042sIssue(summary, form1042sEntries.filter((entry) => entry.taxYear === taxYear)));
+      }
 
       if (trades.length > 0 || dividends.length > 0 || positions.length > 0) {
         parsed.issues.push(aggregateIssue(file.name, trades, dividends, positions));
+      } else if (form1042sEntries.length > 0) {
+        if (taxSummaries.length === 0) {
+          parsed.issues.push(unsupported1042sIssue(file.name, form1042sEntries));
+        }
       } else if (statementDetected) {
         parsed.issues.push({
           id: "ibkr-no-stock-activity",
@@ -595,7 +792,7 @@ export async function parseIbkrPdfs(files: IbkrFileInput[]): Promise<ParsedInput
           id: `ibkr-${file.name}-unsupported`,
           severity: "blocking",
           title: "IBKR 文件格式不符合要求",
-          detail: "当前仅支持 IBKR/盈透证券 PDF Activity Statement / 活动账单。",
+          detail: "当前仅支持 IBKR/盈透证券 PDF Activity Statement / 活动账单，或 Form 1042-S 税表。",
           source: file.name,
         });
       }
