@@ -4,6 +4,7 @@ import {
   mergeParsedInputs,
 } from "@/lib/tax/calculator";
 import { taxConfigForYear } from "@/lib/tax/config";
+import { parseBociPdfs } from "@/lib/parsers/boci";
 import { parseChiefPdfs } from "@/lib/parsers/chief";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
@@ -22,6 +23,7 @@ export type BrokerId =
   | "futu"
   | "longbridge"
   | "panda"
+  | "boci"
   | "cmbWingLung"
   | "chief"
   | "tiger"
@@ -147,6 +149,7 @@ export async function analyzeUploadedFiles(options: {
   const huataiFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const longbridgeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const pandaFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const bociFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const cmbWingLungFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const chiefFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const tigerFiles: Array<{ name: string; data: ArrayBuffer }> = [];
@@ -183,6 +186,11 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为熊猫，但熊猫解析器只接受 PDF 月结单。`, file.name);
       }
       pandaFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else if (entry.broker === "boci") {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为中银国际，但中银国际解析器只接受 PDF 账户月结单。`, file.name);
+      }
+      bociFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "cmbWingLung") {
       if (!lower.endsWith(".pdf")) {
         throw new ParserValidationError(`${file.name} 被标记为招商永隆，但招商永隆解析器只接受 PDF 全年收入报告或证券账户月结单。`, file.name);
@@ -261,6 +269,17 @@ export async function analyzeUploadedFiles(options: {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
       securityAliases: options.securityAliases ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
+  }
+  if (bociFiles.length > 0) {
+    const parsed = await parseBociPdfs(bociFiles, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
     });
     const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
     if (blocking) {

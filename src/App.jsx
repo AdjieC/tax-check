@@ -1350,6 +1350,7 @@ function brokerLabel(broker) {
   if (broker === "huasheng") return "华盛";
   if (broker === "longbridge") return "长桥";
   if (broker === "panda") return "熊猫";
+  if (broker === "boci") return "中银国际";
   if (broker === "cmbWingLung") return "招商永隆";
   if (broker === "chief") return "致富";
   if (broker === "zircon") return "卓锐";
@@ -1363,6 +1364,7 @@ const BROKER_OPTIONS = [
   { value: "huatai", label: "华泰" },
   { value: "longbridge", label: "长桥" },
   { value: "panda", label: "熊猫" },
+  { value: "boci", label: "中银国际" },
   { value: "cmbWingLung", label: "招商永隆" },
   { value: "chief", label: "致富" },
   { value: "zircon", label: "卓锐" },
@@ -1425,6 +1427,7 @@ const LONGBRIDGE_TEXT_MARKERS = [
 const LONGBRIDGE_STOCK_LEDGER_HEADERS = ["编号", "业务时间", "账户类型", "业务分类", "股票代码", "账户流向", "数量", "总数量"];
 const TIGER_TEXT_MARKERS = ["Tiger Brokers", "Tiger Brokers (NZ)", "活动报表", "Tax Form Record", "Key Tax Figures"];
 const PANDA_TEXT_MARKERS = ["熊猫证券", "熊貓證券", "Panda Securities", "fafa.hk", "cs@fafa.hk", "BNC380"];
+const BOCI_TEXT_MARKERS = ["中银国际证券", "中銀國際證券", "BOCI Securities Limited", "bocionline.com", "AAC298"];
 const CMB_WING_LUNG_TEXT_MARKERS = ["招商永隆", "招商永隆銀行", "招商永隆银行", "CMB Wing Lung", "Annual Income Report", "全年收入報告", "全年收入报告"];
 const CHIEF_TEXT_MARKERS = ["致富证券", "致富證券", "Chief Securities", "chiefgroup.com.hk", "BWN872"];
 const ZIRCON_TEXT_MARKERS = ["卓锐", "卓銳", "Zircon Securities"];
@@ -1635,6 +1638,13 @@ function baseBrokerGuess(fileName) {
       reason: "文件名包含熊猫证券特征，已默认选择熊猫。",
     };
   }
+  if (fileName.includes("中银国际") || fileName.includes("中銀國際") || lower.includes("boci")) {
+    return {
+      broker: "boci",
+      confidence: "high",
+      reason: "文件名包含中银国际/BOCI 特征，已默认选择中银国际。",
+    };
+  }
   if (fileName.includes("招商永隆") || lower.includes("cmb") || lower.includes("wing lung")) {
     return {
       broker: "cmbWingLung",
@@ -1681,7 +1691,7 @@ function baseBrokerGuess(fileName) {
     return {
       broker: "longbridge",
       confidence: "medium",
-      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、招商永隆、致富、卓锐、盈立、老虎或 IBKR 报表，请确认券商选择。",
+      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、中银国际、招商永隆、致富、卓锐、盈立、老虎或 IBKR 报表，请确认券商选择。",
     };
   }
   if (isExcelFile(fileName)) {
@@ -1816,6 +1826,13 @@ async function detectBrokerFromFile(file, password) {
           reason: "文件内容包含熊猫证券特征；当前熊猫解析器支持 PDF 月结单，请解析前确认文件格式。",
         };
       }
+      if (hasAnyMarker(preview, BOCI_TEXT_MARKERS)) {
+        return {
+          broker: "boci",
+          confidence: "medium",
+          reason: "文件内容包含中银国际/BOCI 特征；当前中银国际解析器支持 PDF 账户月结单。",
+        };
+      }
       if (hasAnyMarker(preview, CMB_WING_LUNG_TEXT_MARKERS)) {
         return {
           broker: "cmbWingLung",
@@ -1888,6 +1905,13 @@ async function detectBrokerFromFile(file, password) {
           broker: "tiger",
           confidence: "high",
           reason: "PDF 内容包含老虎/Tiger 报表特征，已默认选择老虎。",
+        };
+      }
+      if (hasAnyMarker(preview, BOCI_TEXT_MARKERS)) {
+        return {
+          broker: "boci",
+          confidence: "high",
+          reason: "PDF 内容包含中银国际证券/BOCI 账户月结单特征，已默认选择中银国际。",
         };
       }
       if (hasAnyMarker(preview, CMB_WING_LUNG_TEXT_MARKERS)) {
@@ -2437,7 +2461,7 @@ function Sidebar({
               <Upload />
             </span>
             <p>{isFileDragActive ? "松开即可上传券商文件" : "拖入或点击上传券商文件"}</p>
-            <span>支持富途 Excel / 华盛 Excel / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 招商永隆 PDF / 卓锐 PDF / 盈立 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
+            <span>支持富途 Excel / 华盛 Excel / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 卓锐 PDF / 盈立 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
           </button>
           <ul className="filelist">
             {fileGroups.map((group) => {
@@ -4740,7 +4764,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/卓锐/盈立 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/中银国际/卓锐/盈立 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -4823,7 +4847,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         <TaxCheckMark className="intro-brand-mark" />
         <h2 id="intro-title">TaxCheck 是什么</h2>
         <p>
-          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、招商永隆、卓锐、盈立、老虎、IBKR等券商。
+          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、中银国际、招商永隆、卓锐、盈立、老虎、IBKR等券商。
           <br />
           <br />
           <b>本工具承诺不保存任何你的财务数据，上传的文件仅在你本地解析使用。</b>
@@ -4835,6 +4859,7 @@ function ProjectIntroModal({ onStart, onClose }) {
           <span>富途 Excel 年度报表</span>
           <span>长桥 PDF 月结单</span>
           <span>熊猫 PDF 月结单</span>
+          <span>中银国际 PDF 账户月结单</span>
           <span>招商永隆 PDF 全年收入报告/月结单</span>
           <span>卓锐 PDF 月结单</span>
           <span>老虎 PDF 税表/活动报表</span>
