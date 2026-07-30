@@ -1355,6 +1355,7 @@ function brokerLabel(broker) {
   if (broker === "chief") return "致富";
   if (broker === "zircon") return "卓锐";
   if (broker === "usmart") return "盈立";
+  if (broker === "zunjia") return "尊嘉";
   return "富途";
 }
 
@@ -1369,6 +1370,7 @@ const BROKER_OPTIONS = [
   { value: "chief", label: "致富" },
   { value: "zircon", label: "卓锐" },
   { value: "usmart", label: "盈立" },
+  { value: "zunjia", label: "尊嘉" },
   { value: "tiger", label: "老虎" },
   { value: "ibkr", label: "IBKR" },
 ];
@@ -1432,6 +1434,7 @@ const CMB_WING_LUNG_TEXT_MARKERS = ["招商永隆", "招商永隆銀行", "招�
 const CHIEF_TEXT_MARKERS = ["致富证券", "致富證券", "Chief Securities", "chiefgroup.com.hk", "BWN872"];
 const ZIRCON_TEXT_MARKERS = ["卓锐", "卓銳", "Zircon Securities"];
 const USMART_TEXT_MARKERS = ["盈立", "盈立證券", "盈立证券", "uSmart Securities", "usmarthk.com", "usmartsecurities.com"];
+const ZUNJIA_TEXT_MARKERS = ["尊嘉证券", "尊嘉證券", "尊嘉金融", "Zunjia Securities", "3169-0319", "400-031-0319"];
 const IBKR_TEXT_MARKERS = [
   "Interactive Brokers",
   "Interactive Brokers LLC",
@@ -1673,6 +1676,13 @@ function baseBrokerGuess(fileName) {
       reason: "文件名包含盈立/uSmart 特征，已默认选择盈立。",
     };
   }
+  if (fileName.includes("尊嘉") || lower.includes("zunjia")) {
+    return {
+      broker: "zunjia",
+      confidence: "high",
+      reason: "文件名包含尊嘉/Zunjia 特征，已默认选择尊嘉。",
+    };
+  }
   if (fileName.includes("老虎") || lower.includes("tiger")) {
     return {
       broker: "tiger",
@@ -1691,7 +1701,7 @@ function baseBrokerGuess(fileName) {
     return {
       broker: "longbridge",
       confidence: "medium",
-      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、中银国际、招商永隆、致富、卓锐、盈立、老虎或 IBKR 报表，请确认券商选择。",
+      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、中银国际、招商永隆、致富、卓锐、盈立、尊嘉、老虎或 IBKR 报表，请确认券商选择。",
     };
   }
   if (isExcelFile(fileName)) {
@@ -1875,6 +1885,13 @@ async function detectBrokerFromFile(file, password) {
           reason: "文件内容包含盈立/uSmart 特征；当前盈立解析器支持 PDF 月结单，请解析前确认文件格式。",
         };
       }
+      if (hasAnyMarker(preview, ZUNJIA_TEXT_MARKERS)) {
+        return {
+          broker: "zunjia",
+          confidence: "medium",
+          reason: "文件内容包含尊嘉证券特征；当前尊嘉解析器支持 PDF 账户月结单。",
+        };
+      }
       if (hasAnyMarker(preview, IBKR_TEXT_MARKERS)) {
         return {
           broker: "ibkr",
@@ -1968,6 +1985,13 @@ async function detectBrokerFromFile(file, password) {
           broker: "usmart",
           confidence: "high",
           reason: "PDF 内容包含盈立/uSmart 月结单特征，已默认选择盈立。",
+        };
+      }
+      if (hasAnyMarker(preview, ZUNJIA_TEXT_MARKERS)) {
+        return {
+          broker: "zunjia",
+          confidence: "high",
+          reason: "PDF 内容包含尊嘉证券账户月结单特征，已默认选择尊嘉。",
         };
       }
       if (hasAnyMarker(preview, HUASHENG_TEXT_MARKERS)) {
@@ -2461,7 +2485,7 @@ function Sidebar({
               <Upload />
             </span>
             <p>{isFileDragActive ? "松开即可上传券商文件" : "拖入或点击上传券商文件"}</p>
-            <span>支持富途 Excel / 华盛 Excel / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 卓锐 PDF / 盈立 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
+            <span>支持富途 Excel / 华盛 Excel / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 卓锐 PDF / 盈立 PDF / 尊嘉 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
           </button>
           <ul className="filelist">
             {fileGroups.map((group) => {
@@ -4764,7 +4788,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/中银国际/卓锐/盈立 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/中银国际/卓锐/盈立/尊嘉 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -4847,7 +4871,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         <TaxCheckMark className="intro-brand-mark" />
         <h2 id="intro-title">TaxCheck 是什么</h2>
         <p>
-          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、中银国际、招商永隆、卓锐、盈立、老虎、IBKR等券商。
+          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、中银国际、招商永隆、卓锐、盈立、尊嘉、老虎、IBKR等券商。
           <br />
           <br />
           <b>本工具承诺不保存任何你的财务数据，上传的文件仅在你本地解析使用。</b>
@@ -4862,6 +4886,7 @@ function ProjectIntroModal({ onStart, onClose }) {
           <span>中银国际 PDF 账户月结单</span>
           <span>招商永隆 PDF 全年收入报告/月结单</span>
           <span>卓锐 PDF 月结单</span>
+          <span>尊嘉 PDF 账户月结单</span>
           <span>老虎 PDF 税表/活动报表</span>
           <span>IBKR PDF 活动账单 / 1042-S 税表</span>
           <span>申报数字与 PDF 底稿</span>
