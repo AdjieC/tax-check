@@ -114,6 +114,7 @@ interface MissingCostRecord {
 
 const ZUNJIA_BROKER = "尊嘉";
 const NUMBER_PATTERN = /^\(?[+-]?\d[\d,]*(?:\.\d+)?\)?$/;
+const ORDER_ID_PATTERN = /^\d{8,}$/;
 
 function clean(value: string) {
   return value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
@@ -408,16 +409,19 @@ function securityNearTrade(lines: TextLine[], index: number, fallbackCurrency: C
 function tradeFeeFromLine(line: TextLine) {
   const text = canonicalText(line.text);
   if (!/交收费\s*[:：]/.test(text)) return null;
-  const labels = ["交收费", "交易费", "交易征费", "财汇局征费", "平台使用费", "印花税", "佣金"];
+  const labels = ["交收费", "交易费", "交易征费", "财汇局征费", "平台使用费", "印花税", "佣金", "暗盘费用"];
   let total = 0;
+  let supplemental = 0;
   let matched = 0;
   for (const label of labels) {
     const match = text.match(new RegExp(`${label}\\s*[:：]\\s*([+-]?\\d[\\d,]*(?:\\.\\d+)?)`));
     if (!match) continue;
-    total += Math.abs(parseNumber(match[1]));
+    const amount = Math.abs(parseNumber(match[1]));
+    total += amount;
+    if (label === "暗盘费用") supplemental += amount;
     matched += 1;
   }
-  return matched > 0 ? roundMoney(total) : null;
+  return matched > 0 ? { total: roundMoney(total), supplemental: roundMoney(supplemental) } : null;
 }
 
 function allocateTradeGroupFee(trades: TradeRecord[], totalFee: number) {
@@ -458,16 +462,17 @@ function parseTradeCandidate(
   sequence: number,
 ): TradeRecord | null {
   const line = lines[index];
-  const dateCell = lineCell(line, 150, 315);
-  const side = tradeSide(lineCell(line, 300, 378));
-  const date = normalizeDate(dateCell) || currentDate;
+  const side = tradeSide(line.text);
+  const date = normalizeDate(line.text) || currentDate;
   if (!side || !date) return null;
   const security = securityNearTrade(lines, index, currentCurrency);
-  const orderId = canonicalText(lineCell(line, 365, 545));
-  const priceToken = numericTokens(line, 530, 615)[0];
-  const quantityToken = numericTokens(line, 605, 700)[0];
-  const amountToken = numericTokens(line, 690)[0];
-  if (!security || !/^\d{12,}$/.test(orderId) || !priceToken || !quantityToken || !amountToken) return null;
+  const orderIdIndex = line.tokens.findIndex((token) => ORDER_ID_PATTERN.test(canonicalText(token.text)));
+  if (!security || orderIdIndex < 0) return null;
+  const orderId = canonicalText(line.tokens[orderIdIndex].text);
+  const [priceToken, quantityToken, amountToken] = line.tokens
+    .slice(orderIdIndex + 1)
+    .filter((token) => NUMBER_PATTERN.test(canonicalText(token.text)));
+  if (!priceToken || !quantityToken || !amountToken) return null;
   const unitPrice = Math.abs(parseNumber(priceToken.text));
   const quantity = Math.abs(parseNumber(quantityToken.text));
   const reportedGross = Math.abs(parseNumber(amountToken.text));
@@ -481,7 +486,7 @@ function parseTradeCandidate(
     sequence,
     orderId,
     date,
-    time: normalizeTime(dateCell) || undefined,
+    time: normalizeTime(line.text) || undefined,
     currency: security.currency,
     market: security.market,
     symbol: security.symbol,
@@ -511,6 +516,7 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
   let pendingPositionName = "";
   let pendingPositionValues: PositionValues | null = null;
   let pendingTradeGroup: TradeRecord[] = [];
+  const supplementalFees: Record<"buy" | "sell", number> = { buy: 0, sell: 0 };
   let sequence = baseSequence;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -558,7 +564,11 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
       }
       const groupFee = tradeFeeFromLine(line);
       if (groupFee !== null) {
-        allocateTradeGroupFee(pendingTradeGroup, groupFee);
+        const groupSide = pendingTradeGroup[0]?.side;
+        if (groupSide && pendingTradeGroup.every((trade) => trade.side === groupSide)) {
+          supplementalFees[groupSide] = roundMoney(supplementalFees[groupSide] + groupFee.supplemental);
+        }
+        allocateTradeGroupFee(pendingTradeGroup, groupFee.total);
         pendingTradeGroup = [];
         continue;
       }
@@ -641,19 +651,33 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
   const parsedBuyFee = roundMoney(raw.trades.filter((trade) => trade.side === "buy").reduce((sum, trade) => sum + trade.fee, 0));
   const parsedSellGross = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.grossAmount, 0));
   const parsedSellFee = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.fee, 0));
-  const mismatches = [
-    ["买入总金额", reported.buyGross, parsedBuyGross],
-    ["买入总费用", reported.buyFee, parsedBuyFee],
-    ["卖出总金额", reported.sellGross, parsedSellGross],
-    ["卖出总费用", reported.sellFee, parsedSellFee],
-  ].filter(([, expected, actual]) => expected !== undefined && Math.abs(Number(expected) - Number(actual)) > 0.02);
+  const comparisons: Array<{ label: string; expected?: number; actual: number; acceptedActuals?: number[] }> = [
+    { label: "买入总金额", expected: reported.buyGross, actual: parsedBuyGross },
+    {
+      label: "买入总费用",
+      expected: reported.buyFee,
+      actual: parsedBuyFee,
+      acceptedActuals: [roundMoney(parsedBuyFee - supplementalFees.buy)],
+    },
+    { label: "卖出总金额", expected: reported.sellGross, actual: parsedSellGross },
+    {
+      label: "卖出总费用",
+      expected: reported.sellFee,
+      actual: parsedSellFee,
+      acceptedActuals: [roundMoney(parsedSellFee - supplementalFees.sell)],
+    },
+  ];
+  const mismatches = comparisons.filter(({ expected, actual, acceptedActuals = [] }) => {
+    if (expected === undefined) return false;
+    return [actual, ...acceptedActuals].every((candidate) => Math.abs(expected - candidate) > 0.02);
+  });
   if (mismatches.length > 0) {
     raw.issues.push({
       id: `zunjia-${sourcePdf}-trade-summary-mismatch`,
       severity: "blocking",
       title: "尊嘉交易汇总核对不一致",
       detail: mismatches
-        .map(([label, expected, actual]) => `${label}月结单为 ${Number(expected).toFixed(2)}，逐笔解析为 ${Number(actual).toFixed(2)}`)
+        .map(({ label, expected, actual }) => `${label}月结单为 ${Number(expected).toFixed(2)}，逐笔解析为 ${actual.toFixed(2)}`)
         .join("；"),
       source: sourcePdf,
     });
