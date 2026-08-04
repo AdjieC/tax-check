@@ -115,6 +115,7 @@ interface MissingCostRecord {
 const ZUNJIA_BROKER = "尊嘉";
 const NUMBER_PATTERN = /^\(?[+-]?\d[\d,]*(?:\.\d+)?\)?$/;
 const ORDER_ID_PATTERN = /^\d{8,}$/;
+const SPACED_NUMBER_PATTERN = "[+-]?\\d[\\d,\\s]*(?:\\.\\s*\\d[\\d\\s]*)?";
 
 function clean(value: string) {
   return value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
@@ -145,6 +146,10 @@ function canonicalText(value: string) {
 }
 
 function compactText(value: string) {
+  return canonicalText(value).replace(/\s+/g, "");
+}
+
+function compactNumericText(value: string) {
   return canonicalText(value).replace(/\s+/g, "");
 }
 
@@ -182,8 +187,8 @@ function normalizeDate(value: string) {
 }
 
 function normalizeTime(value: string) {
-  const match = canonicalText(value).match(/\b([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b/);
-  return match?.[0] ?? "";
+  const match = canonicalText(value).match(/\b((?:[01]\s*\d|2\s*[0-3])\s*:\s*[0-5]\s*\d(?:\s*:\s*[0-5]\s*\d)?)\b/);
+  return match ? match[1].replace(/\s+/g, "") : "";
 }
 
 function lineCell(line: TextLine, minX: number, maxX: number) {
@@ -197,7 +202,7 @@ function lineCell(line: TextLine, minX: number, maxX: number) {
 
 function numericTokens(line: TextLine, minX = 0, maxX = Number.POSITIVE_INFINITY) {
   return line.tokens.filter(
-    (token) => token.x >= minX && token.x < maxX && NUMBER_PATTERN.test(canonicalText(token.text)),
+    (token) => token.x >= minX && token.x < maxX && NUMBER_PATTERN.test(compactNumericText(token.text)),
   );
 }
 
@@ -414,7 +419,7 @@ function tradeFeeFromLine(line: TextLine) {
   let supplemental = 0;
   let matched = 0;
   for (const label of labels) {
-    const match = text.match(new RegExp(`${label}\\s*[:：]\\s*([+-]?\\d[\\d,]*(?:\\.\\d+)?)`));
+    const match = text.match(new RegExp(`${label}\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
     if (!match) continue;
     const amount = Math.abs(parseNumber(match[1]));
     total += amount;
@@ -445,8 +450,8 @@ function statementTradeSummary(lines: TextLine[]) {
     const text = canonicalText(line.text);
     const side = text.includes("买入总金额") ? "buy" : text.includes("卖出总金额") ? "sell" : null;
     if (!side) continue;
-    const gross = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总金额\\s*[:：]\\s*([\\d,]+(?:\\.\\d+)?)`));
-    const fee = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总费用\\s*[:：]\\s*([\\d,]+(?:\\.\\d+)?)`));
+    const gross = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总金额\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
+    const fee = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总费用\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
     if (gross) summary[`${side}Gross`] = parseNumber(gross[1]);
     if (fee) summary[`${side}Fee`] = parseNumber(fee[1]);
   }
@@ -466,12 +471,12 @@ function parseTradeCandidate(
   const date = normalizeDate(line.text) || currentDate;
   if (!side || !date) return null;
   const security = securityNearTrade(lines, index, currentCurrency);
-  const orderIdIndex = line.tokens.findIndex((token) => ORDER_ID_PATTERN.test(canonicalText(token.text)));
+  const orderIdIndex = line.tokens.findIndex((token) => ORDER_ID_PATTERN.test(compactNumericText(token.text)));
   if (!security || orderIdIndex < 0) return null;
-  const orderId = canonicalText(line.tokens[orderIdIndex].text);
+  const orderId = compactNumericText(line.tokens[orderIdIndex].text);
   const [priceToken, quantityToken, amountToken] = line.tokens
     .slice(orderIdIndex + 1)
-    .filter((token) => NUMBER_PATTERN.test(canonicalText(token.text)));
+    .filter((token) => NUMBER_PATTERN.test(compactNumericText(token.text)));
   if (!priceToken || !quantityToken || !amountToken) return null;
   const unitPrice = Math.abs(parseNumber(priceToken.text));
   const quantity = Math.abs(parseNumber(quantityToken.text));

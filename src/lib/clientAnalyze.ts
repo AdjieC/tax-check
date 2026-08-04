@@ -7,6 +7,7 @@ import { taxConfigForYear } from "@/lib/tax/config";
 import { parseBociPdfs } from "@/lib/parsers/boci";
 import { parseChiefPdfs } from "@/lib/parsers/chief";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
+import { parseFangdePdfs } from "@/lib/parsers/fangde";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
 import { parseHuashengWorkbooks } from "@/lib/parsers/huasheng";
 import { parseHuataiPdfs } from "@/lib/parsers/huatai";
@@ -27,6 +28,7 @@ export type BrokerId =
   | "boci"
   | "cmbWingLung"
   | "chief"
+  | "fangde"
   | "tiger"
   | "zircon"
   | "usmart"
@@ -154,6 +156,7 @@ export async function analyzeUploadedFiles(options: {
   const bociFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const cmbWingLungFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const chiefFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const fangdeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const tigerFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const zirconFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const usmartFiles: Array<{ name: string; data: ArrayBuffer }> = [];
@@ -204,6 +207,11 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为致富，但致富解析器只接受 PDF 月结单。`, file.name);
       }
       chiefFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else if (entry.broker === "fangde") {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为方德，但方德解析器只接受 PDF 综合成交单据及账户月结单。`, file.name);
+      }
+      fangdeFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "tiger") {
       if (!lower.endsWith(".pdf")) {
         throw new ParserValidationError(`${file.name} 被标记为老虎，但老虎解析器只接受 PDF 税表或活动报表。`, file.name);
@@ -311,6 +319,17 @@ export async function analyzeUploadedFiles(options: {
       throw new ParserValidationError("检测到致富 PDF 月结单，请先填写致富 PDF 密码后再解析。");
     }
     const parsed = await parseChiefPdfs(chiefFiles, options.password, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
+  }
+  if (fangdeFiles.length > 0) {
+    const parsed = await parseFangdePdfs(fangdeFiles, {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
     });
