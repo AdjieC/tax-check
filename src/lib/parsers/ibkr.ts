@@ -6,7 +6,6 @@ import type {
   DividendIncome,
   OpenPosition,
   ParsedInput,
-  RealizedTrade,
   ReviewIssue,
   TaxStatementSummary,
   TradeActivity,
@@ -521,7 +520,7 @@ function parseTrades(rows: TextRow[], securities: Map<string, SecurityInfo>) {
     const tradeDate = firstDate(dateTime);
     if (!DATE_RE.test(tradeDate)) continue;
 
-    const quantity = parseNumber(rowCell(row, 285, 315));
+    const quantity = parseNumber(rowCell(row, 275, 315));
     if (!quantity) continue;
 
     const side = quantity < 0 ? "sell" : "buy";
@@ -530,7 +529,7 @@ function parseTrades(rows: TextRow[], securities: Map<string, SecurityInfo>) {
     const fee = Math.abs(parseNumber(rowCell(row, 485, 520)));
     const basis = parseNumber(rowCell(row, 530, 570));
     const realizedPnl = parseNumber(rowCell(row, 585, 625));
-    const rawCode = rowCell(row, 730, 760);
+    const rawCode = rowCell(row, 720, 765);
     const security = securityFor(symbol, securities, activeCurrency);
     const grossAmount = Math.abs(proceeds);
     const netAmount = side === "sell" ? roundMoney(Math.max(0, proceeds - fee)) : roundMoney(Math.abs(basis) || grossAmount + fee);
@@ -686,32 +685,7 @@ function tradeActivityFromRow(row: IbkrTradeRow, sequence: number): TradeActivit
     fee: row.fee,
     amount: row.netAmount,
     source: `${row.sourcePdf}#p${row.page}`,
-    note: `IBKR 活动账单股票交易${row.rawCode ? `；代码 ${row.rawCode}` : ""}`,
-    excludedFromTaxReplay: true,
-  };
-}
-
-function realizedTradeFromRow(row: IbkrTradeRow, sequence: number): RealizedTrade | null {
-  if (row.side !== "sell") return null;
-  const proceeds = roundMoney(row.netAmount);
-  const costBasis = roundMoney(proceeds - row.realizedPnl);
-  return {
-    id: `ibkr-reported-${row.tradeDate}-${sequence}-${row.symbol}`,
-    broker: IBKR_BROKER,
-    sellDate: row.tradeDate,
-    time: row.time,
-    sequence,
-    market: row.market,
-    currency: row.currency,
-    symbol: row.symbol,
-    securityName: row.securityName,
-    quantity: row.quantity,
-    proceeds,
-    costBasis,
-    gainLoss: roundMoney(row.realizedPnl),
-    source: `${row.sourcePdf}#p${row.page}`,
-    note: "使用 IBKR 活动账单“已实现的损益”列；卖出收入已扣除佣金/税。",
-    useBrokerReportedGainLoss: true,
+    note: `IBKR 活动账单股票交易${row.rawCode ? `；代码 ${row.rawCode}` : ""}${row.side === "sell" ? `；券商已实现损益 ${row.realizedPnl.toFixed(2)}（仅作核对）` : ""}`,
   };
 }
 
@@ -739,7 +713,7 @@ function aggregateIssue(
     id: `ibkr-${fileName}-parsed`,
     severity: "info",
     title: "已解析 IBKR 活动账单",
-    detail: `读取股票买入 ${buys} 笔、卖出 ${sells.length} 笔，券商已实现盈亏合计 ${realizedPnl.toFixed(2)}。分红 ${dividends.length} 笔，税前 ${dividendGross.toFixed(2)}，预扣税 ${dividendTax.toFixed(2)}。期末持仓 ${positions.length} 条。`,
+    detail: `读取股票买入 ${buys} 笔、卖出 ${sells.length} 笔，券商已实现盈亏合计 ${realizedPnl.toFixed(2)}（仅作核对）。TaxCheck 会按交易流水重放 FIFO / ACB 成本。分红 ${dividends.length} 笔，税前 ${dividendGross.toFixed(2)}，预扣税 ${dividendTax.toFixed(2)}。期末持仓 ${positions.length} 条。`,
     source: fileName,
   };
 }
@@ -761,8 +735,6 @@ export async function parseIbkrPdfs(files: IbkrFileInput[]): Promise<ParsedInput
 
       trades.forEach((trade, index) => {
         parsed.tradeActivities.push(tradeActivityFromRow(trade, index));
-        const realizedTrade = realizedTradeFromRow(trade, index);
-        if (realizedTrade) parsed.realizedTrades.push(realizedTrade);
       });
       parsed.dividends.push(...dividends);
       parsed.openPositions.push(...positions);

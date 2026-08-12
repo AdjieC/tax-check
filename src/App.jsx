@@ -4448,10 +4448,14 @@ function HoldingsPage({
   );
 }
 
-function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onExportCsv, onExportPdf, copied, fx }) {
+function ReportPage({ year, methodId, methodSummaries, files, dividends, onCopyReport, onExportCsv, onExportPdf, copied, fx }) {
   const fifo = methodSummaries.fifo;
   const acb = methodSummaries.acb;
-  const { best, other, isTie, saving } = bestCostMethod(methodSummaries);
+  const selectedId = methodSummaries[methodId] ? methodId : "fifo";
+  const selected = { ...methodById(selectedId), summary: methodSummaries[selectedId] };
+  const comparisonId = selectedId === "fifo" ? "acb" : "fifo";
+  const comparison = { ...methodById(comparisonId), summary: methodSummaries[comparisonId] };
+  const { best, isTie, saving } = bestCostMethod(methodSummaries);
   const dividendRows = (dividends ?? []).map((dividend) => {
     const market = currencyToMarket(dividend.currency);
     return {
@@ -4473,8 +4477,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
   const usDividendEvidenceRows = dividendRows.filter((dividend) => dividend.market === "US" && (dividend.evidence?.imageDataUrl || dividend.evidence?.text));
   const hasForeignCreditMaterials = usDividendTaxBaseRmb > 0 || usDividendWithholdingRmb > 0 || usDividendEvidenceRows.length > 0;
   const foreignCreditOffset = hasForeignCreditMaterials ? 1 : 0;
-  const bestColClass = (id) => (!isTie && best.id === id ? "best" : "");
-  const bestBadge = (id) => (!isTie && best.id === id ? <span className="badge">推荐</span> : null);
+  const selectedColClass = (id) => (selectedId === id ? "best" : "");
+  const selectedBadge = (id) => (selectedId === id ? <span className="badge">当前</span> : null);
 
   return (
     <div className="stage">
@@ -4506,30 +4510,30 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
         <div className="sum">
           <div className="cell">
             <div className="lab">财产转让所得应纳税所得额</div>
-            <div className="val">{fmt(best.summary.capitalTaxBase)}</div>
+            <div className="val">{fmt(selected.summary.capitalTaxBase)}</div>
           </div>
           <div className="cell">
             <div className="lab">利息、股息、红利所得应纳税所得额</div>
             <div className="val">
               <span className="cur">¥</span>
-              {fmt(best.summary.dividendTaxBase)}
+              {fmt(selected.summary.dividendTaxBase)}
             </div>
           </div>
           <div className="cell">
             <div className="lab">其中：美股分红应纳税所得额</div>
             <div className="val">
               <span className="cur">¥</span>
-              {fmt(best.summary.usDividendTaxBase)}
+              {fmt(selected.summary.usDividendTaxBase)}
             </div>
           </div>
           <div className="cell lead">
-            <div className="lab">预估应补税额（推荐口径）</div>
+            <div className="lab">预估应补税额（当前口径）</div>
             <div className="val">
               <span className="cur">RMB</span>
-              {fmt(best.summary.tax)}
+              {fmt(selected.summary.tax)}
             </div>
             <span className="tag">
-              {best.label} · {isTie ? "税额一致" : "税负最优"}
+              {selected.label} · 当前选择
             </span>
           </div>
         </div>
@@ -4541,11 +4545,11 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
           <thead>
             <tr>
               <th>项目（人民币）</th>
-              <th className={`col ${bestColClass("fifo")}`}>
-                自然年 · FIFO{bestBadge("fifo")}
+              <th className={`col ${selectedColClass("fifo")}`}>
+                自然年 · FIFO{selectedBadge("fifo")}
               </th>
-              <th className={`col ${bestColClass("acb")}`}>
-                自然年 · ACB{bestBadge("acb")}
+              <th className={`col ${selectedColClass("acb")}`}>
+                自然年 · ACB{selectedBadge("acb")}
               </th>
             </tr>
           </thead>
@@ -4556,8 +4560,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 已实现盈亏小于 0 时按 0 计税；亏损不抵减利息、股息、红利所得
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>{fmt(fifo.capitalTaxBase)}</td>
-              <td className={`col ${bestColClass("acb")}`}>{fmt(acb.capitalTaxBase)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>{fmt(fifo.capitalTaxBase)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>{fmt(acb.capitalTaxBase)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -4565,8 +4569,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 用于核对买卖流水，非申报应纳税所得额
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
-              <td className={`col ${bestColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -4574,8 +4578,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 按税前分红基数折算人民币，独立于财产转让所得计算
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>{fmt(fifo.dividendTaxBase)}</td>
-              <td className={`col ${bestColClass("acb")}`}>{fmt(acb.dividendTaxBase)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>{fmt(fifo.dividendTaxBase)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>{fmt(acb.dividendTaxBase)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -4583,8 +4587,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 美股分红税前金额 × {fxBasisLabel(fx)} USD/CNY 汇率
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>{fmt(fifo.usDividendTaxBase)}</td>
-              <td className={`col ${bestColClass("acb")}`}>{fmt(acb.usDividendTaxBase)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>{fmt(fifo.usDividendTaxBase)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>{fmt(acb.usDividendTaxBase)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -4592,8 +4596,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 券商已扣缴的境外预提税
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>-¥{fmt(fifo.dividendWithholdingCredit)}</td>
-              <td className={`col ${bestColClass("acb")}`}>-¥{fmt(acb.dividendWithholdingCredit)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>-¥{fmt(fifo.dividendWithholdingCredit)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>-¥{fmt(acb.dividendWithholdingCredit)}</td>
             </tr>
             <tr>
               <td className="rowlab">
@@ -4601,20 +4605,20 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <br />
                 美股分红已扣税额 × {fxBasisLabel(fx)} USD/CNY 汇率
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>-¥{fmt(fifo.usDividendWithholdingCredit)}</td>
-              <td className={`col ${bestColClass("acb")}`}>-¥{fmt(acb.usDividendWithholdingCredit)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>-¥{fmt(fifo.usDividendWithholdingCredit)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>-¥{fmt(acb.usDividendWithholdingCredit)}</td>
             </tr>
             <tr>
               <td className="rowlab">
                 <b>适用税率</b>
               </td>
-              <td className={`col ${bestColClass("fifo")}`}>20%</td>
-              <td className={`col ${bestColClass("acb")}`}>20%</td>
+              <td className={`col ${selectedColClass("fifo")}`}>20%</td>
+              <td className={`col ${selectedColClass("acb")}`}>20%</td>
             </tr>
             <tr className="total">
               <td>预估应补税额</td>
-              <td className={`col ${bestColClass("fifo")}`}>¥{fmt(fifo.tax)}</td>
-              <td className={`col ${bestColClass("acb")}`}>¥{fmt(acb.tax)}</td>
+              <td className={`col ${selectedColClass("fifo")}`}>¥{fmt(fifo.tax)}</td>
+              <td className={`col ${selectedColClass("acb")}`}>¥{fmt(acb.tax)}</td>
             </tr>
           </tbody>
         </table>
@@ -4626,7 +4630,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <>两种成本法税额一致。两种口径使用完全相同的成交流水，仅成本基准不同。</>
               ) : (
                 <>
-                  本次报告建议采用 <b>{best.label}</b>，较 {other.label} 少缴 <b>¥{fmt(saving)}</b>。两种口径使用完全相同的成交流水，仅成本基准不同。
+                  本次报告按当前选择的 <b>{selected.label}</b> 生成；{comparison.label} 口径预估应补 <b>¥{fmt(comparison.summary.tax)}</b>
+                  {selected.id === best.id ? <>，当前口径较低 <b>¥{fmt(saving)}</b></> : <>，当前口径较高 <b>¥{fmt(saving)}</b></>}。两种口径使用完全相同的成交流水，仅成本基准不同。
                 </>
               )}
             </p>
@@ -4643,8 +4648,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
           <thead>
             <tr>
               <th>市场</th>
-              <th className={`r ${bestColClass("fifo")}`}>FIFO 口径{bestBadge("fifo")}</th>
-              <th className={`r ${bestColClass("acb")}`}>ACB 口径{bestBadge("acb")}</th>
+              <th className={`r ${selectedColClass("fifo")}`}>FIFO 口径{selectedBadge("fifo")}</th>
+              <th className={`r ${selectedColClass("acb")}`}>ACB 口径{selectedBadge("acb")}</th>
               <th className="r">折算汇率</th>
             </tr>
           </thead>
@@ -4654,8 +4659,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
                 <td>
                   <span className="mkt-tag">{market === "HK" ? "港股 HKD" : "美股 USD"}</span>
                 </td>
-                <td className={`r num ${classForNumber(fifo.byMarket[market])} ${bestColClass("fifo")}`}>{cnSigned(fifo.byMarket[market])}</td>
-                <td className={`r num ${classForNumber(acb.byMarket[market])} ${bestColClass("acb")}`}>{cnSigned(acb.byMarket[market])}</td>
+                <td className={`r num ${classForNumber(fifo.byMarket[market])} ${selectedColClass("fifo")}`}>{cnSigned(fifo.byMarket[market])}</td>
+                <td className={`r num ${classForNumber(acb.byMarket[market])} ${selectedColClass("acb")}`}>{cnSigned(acb.byMarket[market])}</td>
                 <td className="r num muted">{fx[market].toFixed(4)}</td>
               </tr>
             ))}
@@ -4663,8 +4668,8 @@ function ReportPage({ year, methodSummaries, files, dividends, onCopyReport, onE
           <tfoot>
             <tr>
               <td>财产转让所得实际盈亏合计</td>
-              <td className={`r num ${classForNumber(fifo.capitalGain)} ${bestColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
-              <td className={`r num ${classForNumber(acb.capitalGain)} ${bestColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
+              <td className={`r num ${classForNumber(fifo.capitalGain)} ${selectedColClass("fifo")}`}>{cnSigned(fifo.capitalGain)}</td>
+              <td className={`r num ${classForNumber(acb.capitalGain)} ${selectedColClass("acb")}`}>{cnSigned(acb.capitalGain)}</td>
               <td />
             </tr>
           </tfoot>
@@ -5656,21 +5661,27 @@ export default function App() {
   }
 
   function copyReport() {
-    const { best, other, isTie, saving } = bestCostMethod(methodSummaries);
+    const selectedId = methodSummaries[methodId] ? methodId : "fifo";
+    const selected = { ...methodById(selectedId), summary: methodSummaries[selectedId] };
+    const comparisonId = selectedId === "fifo" ? "acb" : "fifo";
+    const comparison = { ...methodById(comparisonId), summary: methodSummaries[comparisonId] };
+    const { best, isTie, saving } = bestCostMethod(methodSummaries);
     const text = [
       `海外证券资本利得税申报底稿 · 纳税年度 ${year}`,
-      `计算口径：${best.label}${isTie ? "（两种成本法税额一致）" : "（推荐，税负最优）"}`,
-      `财产转让所得实际盈亏：RMB ${cnSigned(best.summary.capitalGain)}`,
-      `财产转让所得应纳税所得额：¥${fmt(best.summary.capitalTaxBase)}`,
-      `利息、股息、红利所得应纳税所得额：¥${fmt(best.summary.dividendTaxBase)}`,
-      `其中美股分红应纳税所得额：¥${fmt(best.summary.usDividendTaxBase)}`,
+      `计算口径：${selected.label}（当前选择${isTie ? "；两种成本法税额一致" : ""}）`,
+      `财产转让所得实际盈亏：RMB ${cnSigned(selected.summary.capitalGain)}`,
+      `财产转让所得应纳税所得额：¥${fmt(selected.summary.capitalTaxBase)}`,
+      `利息、股息、红利所得应纳税所得额：¥${fmt(selected.summary.dividendTaxBase)}`,
+      `其中美股分红应纳税所得额：¥${fmt(selected.summary.usDividendTaxBase)}`,
       "适用税率：20%",
-      `分类税额合计（抵免前）：¥${fmt((best.summary.capitalTaxBase + best.summary.dividendTaxBase) * TAX_RATE)}`,
-      `海外已纳税额：¥${fmt(best.summary.dividendWithholdingCredit)}`,
-      `其中美股分红海外已纳税额：¥${fmt(best.summary.usDividendWithholdingCredit)}`,
-      `预估应补税额：¥${fmt(best.summary.tax)}`,
+      `分类税额合计（抵免前）：¥${fmt((selected.summary.capitalTaxBase + selected.summary.dividendTaxBase) * TAX_RATE)}`,
+      `海外已纳税额：¥${fmt(selected.summary.dividendWithholdingCredit)}`,
+      `其中美股分红海外已纳税额：¥${fmt(selected.summary.usDividendWithholdingCredit)}`,
+      `预估应补税额：¥${fmt(selected.summary.tax)}`,
       "说明：财产转让所得亏损不抵减利息、股息、红利所得应纳税所得额。",
-      isTie ? "自然年 FIFO 与自然年 ACB 税额一致" : `对比${other.label}应缴 ¥${fmt(other.summary.tax)}，可节省 ¥${fmt(saving)}`,
+      isTie
+        ? "自然年 FIFO 与自然年 ACB 税额一致"
+        : `对比${comparison.label}应补 ¥${fmt(comparison.summary.tax)}；当前口径${selected.id === best.id ? "较低" : "较高"} ¥${fmt(saving)}`,
       `${fxBasisLabel(fx)}：USD ${fx.US.toFixed(4)} / HKD ${fx.HK.toFixed(4)}（${fx.date} ${fx.source}）`,
     ].join("\n");
     trackReportGenerated("copy_numbers");
@@ -5795,6 +5806,7 @@ export default function App() {
       {page === "report" ? (
         <ReportPage
           year={year}
+          methodId={methodId}
           methodSummaries={methodSummaries}
           files={files}
           dividends={dividends}
