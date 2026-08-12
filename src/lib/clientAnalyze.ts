@@ -9,7 +9,7 @@ import { parseChiefPdfs } from "@/lib/parsers/chief";
 import { parseCmbWingLungPdfs } from "@/lib/parsers/cmbWingLung";
 import { parseFangdePdfs } from "@/lib/parsers/fangde";
 import { parseFutuWorkbooks, type ManualCostInput } from "@/lib/parsers/futu";
-import { parseHuashengWorkbooks } from "@/lib/parsers/huasheng";
+import { parseHuashengFiles } from "@/lib/parsers/huasheng";
 import { parseHuataiPdfs } from "@/lib/parsers/huatai";
 import { parseIbkrPdfs } from "@/lib/parsers/ibkr";
 import { parseLongbridgeFiles, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
@@ -173,8 +173,8 @@ export async function analyzeUploadedFiles(options: {
       }
       futuFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "huasheng") {
-      if (!lower.endsWith(".xlsx") && !lower.endsWith(".xls")) {
-        throw new ParserValidationError(`${file.name} 被标记为华盛，但华盛解析器只接受“证券交易记录表”和“公司行动记录表”Excel。`, file.name);
+      if (!lower.endsWith(".xlsx") && !lower.endsWith(".xls") && !lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为华盛，但华盛解析器只接受报税 Excel 或华盛资本证券 PDF 月结单。`, file.name);
       }
       huashengFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "huatai") {
@@ -248,7 +248,12 @@ export async function analyzeUploadedFiles(options: {
     inputs.push(parseFutuWorkbooks(futuFiles, options.manualCosts ?? [], options.taxYear));
   }
   if (huashengFiles.length > 0) {
-    inputs.push(parseHuashengWorkbooks(huashengFiles, options.manualCosts ?? [], options.taxYear));
+    const parsed = await parseHuashengFiles(huashengFiles, options.manualCosts ?? [], options.taxYear);
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
   }
   if (huataiFiles.length > 0) {
     const parsed = await parseHuataiPdfs(huataiFiles, {

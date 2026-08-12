@@ -445,17 +445,24 @@ function allocateTradeGroupFee(trades: TradeRecord[], totalFee: number) {
 }
 
 function statementTradeSummary(lines: TextLine[]) {
-  const summary: Partial<Record<"buyGross" | "buyFee" | "sellGross" | "sellFee", number>> = {};
+  const summary: Partial<Record<"buyGross" | "buyFee" | "buyCommission" | "sellGross" | "sellFee" | "sellCommission", number>> = {};
   for (const line of lines) {
     const text = canonicalText(line.text);
     const side = text.includes("买入总金额") ? "buy" : text.includes("卖出总金额") ? "sell" : null;
     if (!side) continue;
     const gross = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总金额\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
     const fee = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总费用\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
+    const commission = text.match(new RegExp(`佣金\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
     if (gross) summary[`${side}Gross`] = parseNumber(gross[1]);
     if (fee) summary[`${side}Fee`] = parseNumber(fee[1]);
+    if (commission) summary[`${side}Commission`] = parseNumber(commission[1]);
   }
   return summary;
+}
+
+function totalFeeIncludingCommission(fee?: number, commission?: number) {
+  if (fee === undefined && commission === undefined) return undefined;
+  return roundMoney((fee ?? 0) + (commission ?? 0));
 }
 
 function parseTradeCandidate(
@@ -656,25 +663,35 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
   const parsedBuyFee = roundMoney(raw.trades.filter((trade) => trade.side === "buy").reduce((sum, trade) => sum + trade.fee, 0));
   const parsedSellGross = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.grossAmount, 0));
   const parsedSellFee = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.fee, 0));
-  const comparisons: Array<{ label: string; expected?: number; actual: number; acceptedActuals?: number[] }> = [
+  const comparisons: Array<{
+    label: string;
+    expected?: number;
+    acceptedExpected?: number[];
+    actual: number;
+    acceptedActuals?: number[];
+  }> = [
     { label: "买入总金额", expected: reported.buyGross, actual: parsedBuyGross },
     {
-      label: "买入总费用",
-      expected: reported.buyFee,
+      label: "买入总费用及佣金",
+      expected: totalFeeIncludingCommission(reported.buyFee, reported.buyCommission),
+      acceptedExpected: reported.buyFee === undefined ? [] : [reported.buyFee],
       actual: parsedBuyFee,
       acceptedActuals: [roundMoney(parsedBuyFee - supplementalFees.buy)],
     },
     { label: "卖出总金额", expected: reported.sellGross, actual: parsedSellGross },
     {
-      label: "卖出总费用",
-      expected: reported.sellFee,
+      label: "卖出总费用及佣金",
+      expected: totalFeeIncludingCommission(reported.sellFee, reported.sellCommission),
+      acceptedExpected: reported.sellFee === undefined ? [] : [reported.sellFee],
       actual: parsedSellFee,
       acceptedActuals: [roundMoney(parsedSellFee - supplementalFees.sell)],
     },
   ];
-  const mismatches = comparisons.filter(({ expected, actual, acceptedActuals = [] }) => {
+  const mismatches = comparisons.filter(({ expected, acceptedExpected = [], actual, acceptedActuals = [] }) => {
     if (expected === undefined) return false;
-    return [actual, ...acceptedActuals].every((candidate) => Math.abs(expected - candidate) > 0.02);
+    return [expected, ...acceptedExpected].every((reportedValue) =>
+      [actual, ...acceptedActuals].every((parsedValue) => Math.abs(reportedValue - parsedValue) > 0.02),
+    );
   });
   if (mismatches.length > 0) {
     raw.issues.push({

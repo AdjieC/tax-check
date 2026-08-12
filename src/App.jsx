@@ -1414,7 +1414,7 @@ const FUTU_SHEET_MARKERS = ["账户信息", "证券-持仓总览", "证券-交�
 const FUTU_TEXT_MARKERS = ["富途", "futu", "moomoo", "牛牛号", "账户号码"];
 const HUASHENG_TRADE_HEADERS = ["参考编号", "交易日期", "市场", "币种", "股票代码", "股票名称", "买/卖", "价格", "数量", "交易金额", "交易费用合计"];
 const HUASHENG_COMPANY_ACTION_HEADERS = ["登记日", "派发日", "市场", "股票代码", "股票名称", "登记数量", "派红利币种", "派发红利金额", "费用"];
-const HUASHENG_TEXT_MARKERS = ["华盛", "華盛", "华盛通", "華盛通", "valuable capital"];
+const HUASHENG_TEXT_MARKERS = ["华盛", "華盛", "华盛通", "華盛通", "valuable capital", "valuable.com.hk", "AUL711"];
 const HUATAI_TEXT_MARKERS = ["华泰金融控股", "華泰金融控股", "HUATAI FINANCIAL HOLDINGS", "HTSC", "AOK809"];
 const LONGBRIDGE_TEXT_MARKERS = [
   "长桥",
@@ -2021,8 +2021,8 @@ async function detectBrokerFromFile(file, password) {
       if (hasAnyMarker(preview, HUASHENG_TEXT_MARKERS)) {
         return {
           broker: "huasheng",
-          confidence: "low",
-          reason: "PDF 内容包含华盛/华盛通特征，但当前华盛解析器只接受“证券交易记录表”和“公司行动记录表”Excel。",
+          confidence: "high",
+          reason: "PDF 内容包含华盛资本证券 / Valuable Capital 月结单特征，已默认选择华盛。",
         };
       }
       if (hasAnyMarker(preview, FUTU_TEXT_MARKERS)) {
@@ -2509,7 +2509,7 @@ function Sidebar({
               <Upload />
             </span>
             <p>{isFileDragActive ? "松开即可上传券商文件" : "拖入或点击上传券商文件"}</p>
-            <span>支持富途 Excel / 华盛 Excel / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 方德 PDF / 卓锐 PDF / 盈立 PDF / 尊嘉 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
+            <span>支持富途 Excel / 华盛 Excel、PDF / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 方德 PDF / 卓锐 PDF / 盈立 PDF / 尊嘉 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
           </button>
           <ul className="filelist">
             {fileGroups.map((group) => {
@@ -4812,7 +4812,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel、华泰/长桥/熊猫/中银国际/方德/卓锐/盈立/尊嘉 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel 或华盛资本证券 PDF 月结单、华泰/长桥/熊猫/中银国际/方德/卓锐/盈立/尊嘉 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -4905,6 +4905,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         </p>
         <div className="intro-points">
           <span>富途 Excel 年度报表</span>
+          <span>华盛 Excel / PDF 月结单</span>
           <span>长桥 PDF 月结单</span>
           <span>熊猫 PDF 月结单</span>
           <span>中银国际 PDF 账户月结单</span>

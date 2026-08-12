@@ -1,7 +1,17 @@
 import * as XLSX from "xlsx";
 import { asCurrency, asNumber, normalizeSymbol, ParserValidationError, sourceId } from "./common";
+import { parseHuashengPdfFiles } from "./huashengPdf";
 import { emptyParsedInput } from "@/lib/tax/calculator";
-import type { CostBasisRequest, Currency, DividendIncome, ParsedInput, RealizedTrade, ReviewIssue, TradeActivity } from "@/lib/tax/types";
+import type {
+  CostBasisRequest,
+  Currency,
+  DividendIncome,
+  OpenPosition,
+  ParsedInput,
+  RealizedTrade,
+  ReviewIssue,
+  TradeActivity,
+} from "@/lib/tax/types";
 
 interface HuashengFileInput {
   name: string;
@@ -267,12 +277,13 @@ function buildMissingCostRecords(activities: TradeActivity[], targetYear: number
 
   for (const activity of [...activities].sort(activitySort)) {
     if (activity.date > endDate) break;
-    if (activity.side !== "buy" && activity.side !== "sell") continue;
+    if (activity.excludedFromTaxReplay) continue;
+    if (!["buy", "acquire", "transfer_in", "sell"].includes(activity.side)) continue;
 
     const key = securityKey(activity);
     const state = states.get(key) ?? { quantity: 0, costBasis: 0 };
 
-    if (activity.side === "buy") {
+    if (activity.side === "buy" || activity.side === "acquire" || activity.side === "transfer_in") {
       state.quantity += activity.quantity;
       state.costBasis += activity.amount;
       states.set(key, state);
@@ -321,9 +332,9 @@ function buildMissingCostRecords(activities: TradeActivity[], targetYear: number
             id: `${requestId}-cost-gap`,
             severity: "warning",
             title: `${activity.symbol} 历史成本缺失`,
-            detail: `${activity.date} 卖出 ${activity.quantity} 股，但上传的华盛证券交易记录表中最多只追踪到 ${roundMoney(
+            detail: `${activity.date} 卖出 ${activity.quantity} 股，但上传的华盛交易记录或月结单中最多只追踪到 ${roundMoney(
               state.quantity,
-            )} 股成本；这笔卖出未计入资本利得。请补充更早年度“证券交易记录表”，或在待补成本中手动添加总成本。`,
+            )} 股成本；这笔卖出未计入资本利得。请补充更早年度“证券交易记录表”或更早月份 PDF 月结单，也可以在待补成本中手动添加总成本。`,
             source: activity.source,
             taxYear: targetYear,
           });
@@ -348,12 +359,7 @@ function buildMissingCostRecords(activities: TradeActivity[], targetYear: number
   return { trades, costBasisRequests, issues };
 }
 
-export function parseHuashengWorkbooks(
-  files: HuashengFileInput[],
-  manualCosts: ManualCostInput[] = [],
-  taxYear?: number,
-): ParsedInput {
-  const parsed = emptyParsedInput();
+function parseWorkbookBase(files: HuashengFileInput[]) {
   const contexts = files.map((file) => {
     const context = {
       fileName: file.name,
@@ -362,17 +368,31 @@ export function parseHuashengWorkbooks(
     validateWorkbook(context);
     return context;
   });
-
-  if (contexts.length === 0) return parsed;
-
   const activities = parseTradeActivities(contexts);
   const dividendResult = parseDividends(contexts);
-  const years = availableYears(activities, dividendResult.dividends, taxYear);
+  return {
+    activities,
+    dividends: dividendResult.dividends,
+    issues: dividendResult.issues,
+  };
+}
+
+function buildHuashengInput(
+  activities: TradeActivity[],
+  dividends: DividendIncome[],
+  openPositions: OpenPosition[],
+  baseIssues: ReviewIssue[],
+  manualCosts: ManualCostInput[] = [],
+  taxYear?: number,
+) {
+  const parsed = emptyParsedInput();
+  const years = availableYears(activities, dividends, taxYear);
   const manualCostLookup = manualCostMap(manualCosts);
 
   parsed.tradeActivities.push(...activities);
-  parsed.dividends.push(...dividendResult.dividends);
-  parsed.issues.push(...dividendResult.issues);
+  parsed.dividends.push(...dividends);
+  parsed.openPositions.push(...openPositions);
+  parsed.issues.push(...baseIssues);
 
   for (const year of years) {
     const missing = buildMissingCostRecords(activities, year, manualCostLookup);
@@ -381,14 +401,43 @@ export function parseHuashengWorkbooks(
     parsed.issues.push(...missing.issues);
   }
 
-  if (activities.length === 0 && dividendResult.dividends.length === 0) {
+  if (activities.length === 0 && dividends.length === 0 && !baseIssues.some((issue) => issue.severity === "blocking")) {
     parsed.issues.push({
       id: "huasheng-no-tax-records",
       severity: "warning",
       title: "未读取到华盛报税相关记录",
-      detail: "请上传华盛证券导出的“证券交易记录表”用于股票买卖，以及“公司行动记录表”用于现金分红。期初/期末账户资产表只适合人工核对，不会产生报税记录。",
+      detail: "请上传华盛证券导出的“证券交易记录表”/“公司行动记录表”Excel，或华盛资本证券 / Valuable Capital PDF 月结单。期初/期末账户资产表只适合人工核对，不会产生报税记录。",
     });
   }
 
   return parsed;
+}
+
+export function parseHuashengWorkbooks(
+  files: HuashengFileInput[],
+  manualCosts: ManualCostInput[] = [],
+  taxYear?: number,
+): ParsedInput {
+  if (files.length === 0) return emptyParsedInput();
+  const base = parseWorkbookBase(files);
+  return buildHuashengInput(base.activities, base.dividends, [], base.issues, manualCosts, taxYear);
+}
+
+export async function parseHuashengFiles(
+  files: HuashengFileInput[],
+  manualCosts: ManualCostInput[] = [],
+  taxYear?: number,
+): Promise<ParsedInput> {
+  const workbookFiles = files.filter((file) => /\.xlsx?$/i.test(file.name));
+  const pdfFiles = files.filter((file) => /\.pdf$/i.test(file.name));
+  const workbookBase = parseWorkbookBase(workbookFiles);
+  const pdfBase = pdfFiles.length > 0 ? await parseHuashengPdfFiles(pdfFiles) : emptyParsedInput();
+  return buildHuashengInput(
+    [...workbookBase.activities, ...pdfBase.tradeActivities],
+    [...workbookBase.dividends, ...pdfBase.dividends],
+    pdfBase.openPositions,
+    [...workbookBase.issues, ...pdfBase.issues],
+    manualCosts,
+    taxYear,
+  );
 }
