@@ -91,6 +91,12 @@ interface ZunjiaRawData {
   statementDetected: boolean;
 }
 
+interface StatementTradeSummary
+  extends Partial<Record<"buyGross" | "buyFee" | "buyCommission" | "sellGross" | "sellFee" | "sellCommission", number>> {
+  tradeGross?: number;
+  tradeFee?: number;
+}
+
 interface PositionValues {
   quantity: number;
   closingPrice: number;
@@ -414,7 +420,7 @@ function securityNearTrade(lines: TextLine[], index: number, fallbackCurrency: C
 function tradeFeeFromLine(line: TextLine) {
   const text = canonicalText(line.text);
   if (!/交收费\s*[:：]/.test(text)) return null;
-  const labels = ["交收费", "交易费", "交易征费", "财汇局征费", "平台使用费", "印花税", "佣金", "暗盘费用"];
+  const labels = ["交收费", "证监会费", "交易活动费", "交易费", "交易征费", "财汇局征费", "平台使用费", "印花税", "期权监管费", "佣金", "暗盘费用"];
   let total = 0;
   let supplemental = 0;
   let matched = 0;
@@ -445,9 +451,14 @@ function allocateTradeGroupFee(trades: TradeRecord[], totalFee: number) {
 }
 
 function statementTradeSummary(lines: TextLine[]) {
-  const summary: Partial<Record<"buyGross" | "buyFee" | "buyCommission" | "sellGross" | "sellFee" | "sellCommission", number>> = {};
+  const summary: StatementTradeSummary = {};
   for (const line of lines) {
     const text = canonicalText(line.text);
+    const tradeGross = text.match(new RegExp(`(?:^|\\s)成交金额\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})\\s*(?:港元|港币|美元|人民币|HKD|USD|CNY)?`));
+    const tradeFee = text.match(new RegExp(`合计费用\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})\\s*(?:港元|港币|美元|人民币|HKD|USD|CNY)?`));
+    if (tradeGross) summary.tradeGross = parseNumber(tradeGross[1]);
+    if (tradeFee) summary.tradeFee = parseNumber(tradeFee[1]);
+
     const side = text.includes("买入总金额") ? "buy" : text.includes("卖出总金额") ? "sell" : null;
     if (!side) continue;
     const gross = text.match(new RegExp(`${side === "buy" ? "买入" : "卖出"}总金额\\s*[:：]\\s*(${SPACED_NUMBER_PATTERN})`));
@@ -461,8 +472,12 @@ function statementTradeSummary(lines: TextLine[]) {
 }
 
 function totalFeeIncludingCommission(fee?: number, commission?: number) {
-  if (fee === undefined && commission === undefined) return undefined;
+  if (fee === undefined) return undefined;
   return roundMoney((fee ?? 0) + (commission ?? 0));
+}
+
+function valuesWithOptional(value?: number) {
+  return value === undefined ? [] : [value];
 }
 
 function parseTradeCandidate(
@@ -663,6 +678,12 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
   const parsedBuyFee = roundMoney(raw.trades.filter((trade) => trade.side === "buy").reduce((sum, trade) => sum + trade.fee, 0));
   const parsedSellGross = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.grossAmount, 0));
   const parsedSellFee = roundMoney(raw.trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + trade.fee, 0));
+  const hasBuyTrades = raw.trades.some((trade) => trade.side === "buy");
+  const hasSellTrades = raw.trades.some((trade) => trade.side === "sell");
+  const alternateBuyGross = hasBuyTrades && !hasSellTrades ? reported.tradeGross : undefined;
+  const alternateSellGross = hasSellTrades && !hasBuyTrades ? reported.tradeGross : undefined;
+  const alternateBuyFee = hasBuyTrades && !hasSellTrades ? reported.tradeFee : undefined;
+  const alternateSellFee = hasSellTrades && !hasBuyTrades ? reported.tradeFee : undefined;
   const comparisons: Array<{
     label: string;
     expected?: number;
@@ -670,19 +691,19 @@ function parseZunjiaLines(sourcePdf: string, lines: TextLine[], baseSequence: nu
     actual: number;
     acceptedActuals?: number[];
   }> = [
-    { label: "买入总金额", expected: reported.buyGross, actual: parsedBuyGross },
+    { label: "买入总金额", expected: reported.buyGross, acceptedExpected: valuesWithOptional(alternateBuyGross), actual: parsedBuyGross },
     {
       label: "买入总费用及佣金",
       expected: totalFeeIncludingCommission(reported.buyFee, reported.buyCommission),
-      acceptedExpected: reported.buyFee === undefined ? [] : [reported.buyFee],
+      acceptedExpected: [...valuesWithOptional(reported.buyFee), ...valuesWithOptional(alternateBuyFee)],
       actual: parsedBuyFee,
       acceptedActuals: [roundMoney(parsedBuyFee - supplementalFees.buy)],
     },
-    { label: "卖出总金额", expected: reported.sellGross, actual: parsedSellGross },
+    { label: "卖出总金额", expected: reported.sellGross, acceptedExpected: valuesWithOptional(alternateSellGross), actual: parsedSellGross },
     {
       label: "卖出总费用及佣金",
       expected: totalFeeIncludingCommission(reported.sellFee, reported.sellCommission),
-      acceptedExpected: reported.sellFee === undefined ? [] : [reported.sellFee],
+      acceptedExpected: [...valuesWithOptional(reported.sellFee), ...valuesWithOptional(alternateSellFee)],
       actual: parsedSellFee,
       acceptedActuals: [roundMoney(parsedSellFee - supplementalFees.sell)],
     },
