@@ -14,6 +14,7 @@ import { parseHuataiPdfs } from "@/lib/parsers/huatai";
 import { parseIbkrPdfs } from "@/lib/parsers/ibkr";
 import { parseLongbridgeFiles, type ManualSecurityAliasInput } from "@/lib/parsers/longbridge";
 import { parsePandaPdfs } from "@/lib/parsers/panda";
+import { parseSchwabPdfs } from "@/lib/parsers/schwab";
 import { parseTigerPdfs } from "@/lib/parsers/tiger";
 import { parseUsmartPdfs } from "@/lib/parsers/usmart";
 import { parseZirconPdfs } from "@/lib/parsers/zircon";
@@ -29,6 +30,7 @@ export type BrokerId =
   | "cmbWingLung"
   | "chief"
   | "fangde"
+  | "schwab"
   | "tiger"
   | "zircon"
   | "usmart"
@@ -157,6 +159,7 @@ export async function analyzeUploadedFiles(options: {
   const cmbWingLungFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const chiefFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const fangdeFiles: Array<{ name: string; data: ArrayBuffer }> = [];
+  const schwabFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const tigerFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const zirconFiles: Array<{ name: string; data: ArrayBuffer }> = [];
   const usmartFiles: Array<{ name: string; data: ArrayBuffer }> = [];
@@ -212,6 +215,11 @@ export async function analyzeUploadedFiles(options: {
         throw new ParserValidationError(`${file.name} 被标记为方德，但方德解析器只接受 PDF 综合成交单据及账户月结单。`, file.name);
       }
       fangdeFiles.push({ name: file.name, data: await file.arrayBuffer() });
+    } else if (entry.broker === "schwab") {
+      if (!lower.endsWith(".pdf")) {
+        throw new ParserValidationError(`${file.name} 被标记为嘉信，但嘉信解析器只接受 PDF Brokerage Statement 月结单。`, file.name);
+      }
+      schwabFiles.push({ name: file.name, data: await file.arrayBuffer() });
     } else if (entry.broker === "tiger") {
       if (!lower.endsWith(".pdf")) {
         throw new ParserValidationError(`${file.name} 被标记为老虎，但老虎解析器只接受 PDF 税表或活动报表。`, file.name);
@@ -335,6 +343,17 @@ export async function analyzeUploadedFiles(options: {
   }
   if (fangdeFiles.length > 0) {
     const parsed = await parseFangdePdfs(fangdeFiles, {
+      targetYear: options.taxYear,
+      manualCosts: options.manualCosts ?? [],
+    });
+    const blocking = parsed.issues.find((issue) => issue.severity === "blocking");
+    if (blocking) {
+      throw new ParserValidationError(`${blocking.title}：${blocking.detail}`, blocking.source);
+    }
+    inputs.push(parsed);
+  }
+  if (schwabFiles.length > 0) {
+    const parsed = await parseSchwabPdfs(schwabFiles, {
       targetYear: options.taxYear,
       manualCosts: options.manualCosts ?? [],
     });

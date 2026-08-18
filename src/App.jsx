@@ -1354,6 +1354,7 @@ function brokerLabel(broker) {
   if (broker === "cmbWingLung") return "招商永隆";
   if (broker === "chief") return "致富";
   if (broker === "fangde") return "方德";
+  if (broker === "schwab") return "嘉信";
   if (broker === "zircon") return "卓锐";
   if (broker === "usmart") return "盈立";
   if (broker === "zunjia") return "尊嘉";
@@ -1370,6 +1371,7 @@ const BROKER_OPTIONS = [
   { value: "cmbWingLung", label: "招商永隆" },
   { value: "chief", label: "致富" },
   { value: "fangde", label: "方德" },
+  { value: "schwab", label: "嘉信" },
   { value: "zircon", label: "卓锐" },
   { value: "usmart", label: "盈立" },
   { value: "zunjia", label: "尊嘉" },
@@ -1435,6 +1437,7 @@ const BOCI_TEXT_MARKERS = ["中银国际证券", "中銀國際證券", "BOCI Sec
 const CMB_WING_LUNG_TEXT_MARKERS = ["招商永隆", "招商永隆銀行", "招商永隆银行", "CMB Wing Lung", "Annual Income Report", "全年收入報告", "全年收入报告"];
 const CHIEF_TEXT_MARKERS = ["致富证券", "致富證券", "Chief Securities", "chiefgroup.com.hk", "BWN872"];
 const FANGDE_TEXT_MARKERS = ["方德证券", "方德證券", "Forthright Securities", "forthright-sec.com", "BGP713", "B02032"];
+const SCHWAB_TEXT_MARKERS = ["Charles Schwab", "Schwab One International", "schwab.com/stmt"];
 const ZIRCON_TEXT_MARKERS = ["卓锐", "卓銳", "Zircon Securities"];
 const USMART_TEXT_MARKERS = ["盈立", "盈立證券", "盈立证券", "uSmart Securities", "usmarthk.com", "usmartsecurities.com"];
 const ZUNJIA_TEXT_MARKERS = ["尊嘉证券", "尊嘉證券", "尊嘉金融", "Zunjia Securities", "3169-0319", "400-031-0319"];
@@ -1535,6 +1538,15 @@ function hasTigerReportMarkers(text) {
     lower.includes("tiger brokers") ||
     (normalized.includes("Tax Form Record") && normalized.includes("Key Tax Figures")) ||
     (normalized.includes("活动报表") && normalized.includes("交易明细"))
+  );
+}
+
+function hasSchwabStatementMarkers(text) {
+  const compact = normalizedBrokerMarkerText(text).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    compact.includes("schwab") &&
+    (compact.includes("statementperiod") || compact.includes("accountsummary")) &&
+    (compact.includes("transactiondetails") || compact.includes("positionssummary"))
   );
 }
 
@@ -1672,6 +1684,13 @@ function baseBrokerGuess(fileName) {
       reason: "文件名包含方德/Forthright 特征，已默认选择方德。",
     };
   }
+  if (fileName.includes("嘉信") || lower.includes("schwab") || /brokerage[ _-]+statement/.test(lower)) {
+    return {
+      broker: "schwab",
+      confidence: "high",
+      reason: "文件名包含嘉信/Schwab 特征，已默认选择嘉信。",
+    };
+  }
   if (fileName.includes("卓锐") || fileName.includes("卓銳") || lower.includes("zircon")) {
     return {
       broker: "zircon",
@@ -1711,7 +1730,7 @@ function baseBrokerGuess(fileName) {
     return {
       broker: "longbridge",
       confidence: "medium",
-      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、中银国际、招商永隆、致富、方德、卓锐、盈立、尊嘉、老虎或 IBKR 报表，请确认券商选择。",
+      reason: "PDF 文件会默认按长桥月结单处理；如为华泰、熊猫、中银国际、招商永隆、致富、方德、嘉信、卓锐、盈立、尊嘉、老虎或 IBKR 报表，请确认券商选择。",
     };
   }
   if (isExcelFile(fileName)) {
@@ -1920,6 +1939,13 @@ async function detectBrokerFromFile(file, password) {
 
     if (isPdfFile(file.name)) {
       const preview = await pdfPreviewText(file, password);
+      if (hasAnyMarker(preview, SCHWAB_TEXT_MARKERS) || hasSchwabStatementMarkers(preview)) {
+        return {
+          broker: "schwab",
+          confidence: "high",
+          reason: "PDF 内容包含 Charles Schwab Brokerage Statement 特征，已默认选择嘉信。",
+        };
+      }
       if (hasAnyMarker(preview, HUATAI_TEXT_MARKERS)) {
         return {
           broker: "huatai",
@@ -2509,7 +2535,7 @@ function Sidebar({
               <Upload />
             </span>
             <p>{isFileDragActive ? "松开即可上传券商文件" : "拖入或点击上传券商文件"}</p>
-            <span>支持富途 Excel / 华盛 Excel、PDF / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 方德 PDF / 卓锐 PDF / 盈立 PDF / 尊嘉 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
+            <span>支持富途 Excel / 华盛 Excel、PDF / 华泰 PDF / 长桥 PDF / 熊猫 PDF / 中银国际 PDF / 招商永隆 PDF / 方德 PDF / 嘉信 PDF / 卓锐 PDF / 盈立 PDF / 尊嘉 PDF / 老虎 PDF / IBKR PDF · .xlsx .xls .pdf</span>
           </button>
           <ul className="filelist">
             {fileGroups.map((group) => {
@@ -4817,7 +4843,7 @@ const TOUR_STEPS = [
   {
     target: "upload-card",
     title: "上传券商材料",
-    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel 或华盛资本证券 PDF 月结单、华泰/长桥/熊猫/中银国际/方德/卓锐/盈立/尊嘉 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
+    body: "从这里导入富途 Excel 年度报表、华盛证券交易记录表/公司行动记录表 Excel 或华盛资本证券 PDF 月结单、华泰/长桥/熊猫/中银国际/方德/嘉信/卓锐/盈立/尊嘉 PDF 月结单、招商永隆 PDF 全年收入报告或证券账户月结单、老虎 PDF 报表、IBKR PDF 活动账单或 1042-S 税表。上传后系统会尝试判断券商和文件类型。",
     images: [
       {
         src: `${ASSET_BASE}tour/futu-annual-report.jpg`,
@@ -4900,7 +4926,7 @@ function ProjectIntroModal({ onStart, onClose }) {
         <TaxCheckMark className="intro-brand-mark" />
         <h2 id="intro-title">TaxCheck 是什么</h2>
         <p>
-          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、中银国际、招商永隆、方德、卓锐、盈立、尊嘉、老虎、IBKR等券商。
+          TaxCheck是快速为中国大陆居民打造的免费海外资本利得税计算工具，支持富途、华盛、华泰、长桥、熊猫、中银国际、招商永隆、方德、嘉信、卓锐、盈立、尊嘉、老虎、IBKR等券商。
           <br />
           <br />
           <b>本工具承诺不保存任何你的财务数据，上传的文件仅在你本地解析使用。</b>
@@ -4916,6 +4942,7 @@ function ProjectIntroModal({ onStart, onClose }) {
           <span>中银国际 PDF 账户月结单</span>
           <span>招商永隆 PDF 全年收入报告/月结单</span>
           <span>方德 PDF 综合成交单据及账户月结单</span>
+          <span>嘉信 PDF Brokerage Statement 月结单</span>
           <span>卓锐 PDF 月结单</span>
           <span>尊嘉 PDF 账户月结单</span>
           <span>老虎 PDF 税表/活动报表</span>
@@ -5633,6 +5660,7 @@ export default function App() {
   }
 
   function exportCsv() {
+    trackReportGenerated("export_csv");
     const header = ["市场", "代码", "名称", "币种", "成本法", "盈亏原币", "折算汇率", "盈亏RMB"];
     const body = rows.map((row) => [
       row.market,
@@ -5656,8 +5684,11 @@ export default function App() {
     const a = document.createElement("a");
     a.href = url;
     a.download = `TaxCheck_${year}_${methodById(methodId).tag}.csv`;
+    a.style.display = "none";
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function copyReport() {
