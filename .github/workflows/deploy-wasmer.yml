@@ -1,0 +1,92 @@
+name: Deploy to Wasmer Edge
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+concurrency:
+  group: wasmer-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      WASMER_TOKEN: ${{ secrets.WASMER_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Normalize npm registry
+        shell: bash
+        run: |
+          if grep -q "registry.npmmirror.com" package-lock.json; then
+            sed -i \
+              's#https://registry.npmmirror.com#https://registry.npmjs.org#g' \
+              package-lock.json
+          fi
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build Vite application
+        run: npm run build
+
+      - name: Verify build
+        shell: bash
+        run: |
+          test -d dist
+          test -f dist/index.html
+          echo "Build output:"
+          du -sh dist
+          find dist -maxdepth 2 -type f | head -50
+
+      - name: Prepare Wasmer package
+        shell: bash
+        run: |
+          rm -rf .wasmer/dist
+          cp -a dist .wasmer/dist
+
+          # Give every CI deployment a unique package version.
+          sed -i \
+            "s/^version = \".*\"/version = \"0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}\"/" \
+            .wasmer/wasmer.toml
+
+          echo "Wasmer package version:"
+          grep '^version' .wasmer/wasmer.toml
+
+      - name: Install Wasmer CLI
+        shell: bash
+        run: |
+          curl https://get.wasmer.io -sSfL | sh
+          echo "$HOME/.wasmer/bin" >> "$GITHUB_PATH"
+
+      - name: Check Wasmer CLI
+        run: |
+          wasmer --version
+          wasmer whoami
+
+      - name: Deploy to Wasmer Edge
+        working-directory: .wasmer
+        run: |
+          wasmer deploy --bump
+
+      - name: Show deployment info
+        run: |
+          wasmer app info adjiec/tax-check
