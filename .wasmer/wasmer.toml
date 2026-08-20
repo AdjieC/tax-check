@@ -1,11 +1,10 @@
-[package]
-name = "adjiec/tax-check"
-version = "0.1.0"
-description = "Tax Check static frontend"
-private = true
-
 [dependencies]
-"sharrattj/static-web-server" = "1"
+"wasmer/static-web-server" = "1"
 
 [fs]
-public = "dist"
+"/public" = "dist"
+
+[[command]]
+name = "script"
+module = "wasmer/static-web-server:webserver"
+runner = "https://webc.org/runner/wasi"
