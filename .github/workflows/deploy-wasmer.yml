@@ -63,14 +63,9 @@ jobs:
         run: |
           rm -rf .wasmer/dist
           cp -a dist .wasmer/dist
-
-          # Give every CI deployment a unique package version.
-          sed -i \
-            "s/^version = \".*\"/version = \"0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}\"/" \
-            .wasmer/wasmer.toml
-
-          echo "Wasmer package version:"
-          grep '^version' .wasmer/wasmer.toml
+      
+          echo "Wasmer package contents:"
+          find .wasmer/dist -maxdepth 2 -type f | head -50
 
       - name: Install Wasmer CLI
         shell: bash
@@ -88,6 +83,42 @@ jobs:
         run: |
           echo "::add-mask::$WASMER_DOMAIN"
           echo "::add-mask::https://$WASMER_DOMAIN"
+
+      - name: Test Wasmer package locally
+        working-directory: .wasmer
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          wasmer run . > /tmp/wasmer-local.log 2>&1 &
+          WASMER_PID=$!
+      
+          cleanup() {
+            kill "$WASMER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+      
+          echo "Waiting for local Wasmer server..."
+      
+          for i in $(seq 1 30); do
+            if curl -fsS \
+              http://127.0.0.1:8080/ \
+              -o /tmp/wasmer-index.html; then
+      
+              echo "Local Wasmer package is healthy."
+              echo "Response:"
+              head -c 300 /tmp/wasmer-index.html
+              echo
+              exit 0
+            fi
+      
+            sleep 1
+          done
+      
+          echo "Local Wasmer package failed to start."
+          echo "===== wasmer run output ====="
+          cat /tmp/wasmer-local.log
+          exit 1
 
       - name: Deploy to Wasmer Edge
         working-directory: .wasmer
