@@ -90,11 +90,12 @@ jobs:
         run: |
           set -euo pipefail
       
-          wasmer run . --net > /tmp/wasmer-local.log 2>&1 &
+          sudo -E "$HOME/.wasmer/bin/wasmer" run . --net \
+            > /tmp/wasmer-local.log 2>&1 &
           WASMER_PID=$!
       
           cleanup() {
-            kill "$WASMER_PID" 2>/dev/null || true
+            sudo kill "$WASMER_PID" 2>/dev/null || true
           }
           trap cleanup EXIT
       
@@ -102,7 +103,7 @@ jobs:
       
           for i in $(seq 1 30); do
             if curl -fsS \
-              http://127.0.0.1:8080/ \
+              http://127.0.0.1:80/ \
               -o /tmp/wasmer-index.html; then
       
               echo "Local Wasmer package is healthy."
