@@ -94,6 +94,12 @@ jobs:
         run: |
           wasmer deploy
 
+      - name: Show Wasmer runtime logs
+        if: always()
+        run: |
+          echo "===== Wasmer App Logs ====="
+          wasmer app logs tax-check --max 200 || true
+
       - name: Show deployment info
         run: |
           wasmer app info adjiec/tax-check
