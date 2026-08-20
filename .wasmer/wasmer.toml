@@ -3,6 +3,7 @@ name = "adjiec/tax-check"
 version = "0.1.0"
 description = "Tax Check static frontend"
 entrypoint = "webserver"
+private = true
 
 [dependencies]
 "wasmer/static-web-server" = "1"
