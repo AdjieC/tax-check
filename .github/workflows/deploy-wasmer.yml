@@ -22,6 +22,7 @@ jobs:
 
     env:
       WASMER_TOKEN: ${{ secrets.WASMER_TOKEN }}
+      WASMER_DOMAIN: ${{ secrets.WASMER_DOMAIN }}
 
     steps:
       - name: Checkout repository
@@ -81,6 +82,12 @@ jobs:
         run: |
           wasmer --version
           wasmer whoami
+
+      - name: Mask deployment domain
+        shell: bash
+        run: |
+          echo "::add-mask::$WASMER_DOMAIN"
+          echo "::add-mask::https://$WASMER_DOMAIN"
 
       - name: Deploy to Wasmer Edge
         working-directory: .wasmer
