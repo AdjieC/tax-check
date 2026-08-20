@@ -4,3 +4,5 @@ owner: adjiec
 name: tax-check
 
 package: .
+
+debug: true
