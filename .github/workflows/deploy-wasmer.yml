@@ -85,7 +85,7 @@ jobs:
       - name: Deploy to Wasmer Edge
         working-directory: .wasmer
         run: |
-          wasmer deploy --bump
+          wasmer deploy
 
       - name: Show deployment info
         run: |
