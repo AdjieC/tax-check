@@ -1,0 +1,6 @@
+kind: wasmer.io/App.v0
+
+owner: adjiec
+name: tax-check
+
+package: .
